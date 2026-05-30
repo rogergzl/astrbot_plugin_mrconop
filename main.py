@@ -42,7 +42,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.1.1")
+@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.2.0")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化
@@ -110,6 +110,7 @@ class MrconPlugin(Star):
         self.pdb_new_pts = int(player_db_cfg.get("new_player_points", 50) or 50)
         self.pdb_comp_enabled = bool(player_db_cfg.get("compensation_enabled", False))
         self.pdb_comp_admin = bool(player_db_cfg.get("compensation_require_admin", True))
+        self.pdb_comp_blacklist = list(player_db_cfg.get("compensation_blacklist", []))
 
         self.group_map = {}
         self.group_servers = {}
@@ -1018,26 +1019,45 @@ class MrconPlugin(Star):
         ]
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("compensate", desc="申请物品补偿")
+    def _check_comp_blacklist(self, rcon_cmd: str) -> str:
+        if not self.pdb_comp_blacklist:
+            return ""
+        words = re.findall(r"\w+", rcon_cmd.lower())
+        for banned in self.pdb_comp_blacklist:
+            banned_lower = str(banned).lower()
+            if banned_lower in words:
+                return banned_lower
+        return ""
+
+    @filter.command("compensate", desc="申请物品补偿（输入完整RCON命令）", alias={"comp"})
     async def cmd_compensate(self, event: AstrMessageEvent, *args):
         if not self.pdb_enabled or not self.pdb_comp_enabled:
             yield event.plain_result("物品补偿功能未开启")
+            return
+        if not self.is_allowed(event):
+            yield event.plain_result("⚠️ 仅白名单用户可使用物品补偿申请")
             return
         qq_id = str(event.get_sender_id())
         p = self._ensure_player(qq_id)
         if not p.get("mc_id"):
             yield event.plain_result("请先用 /bind 绑定 MC 账号")
             return
-        desc = " ".join(str(a) for a in args) if args else ""
-        if not desc:
-            yield event.plain_result("用法: /compensate <丢失原因和物品描述>")
+        rcon_cmd = " ".join(str(a) for a in args).strip()
+        if not rcon_cmd:
+            yield event.plain_result("用法: /comp <完整RCON命令>\n例: /comp give PlayerName diamond 64")
             return
-        comp_id = self.db.add_compensation(qq_id, p["mc_id"], desc)
+        banned = self._check_comp_blacklist(rcon_cmd)
+        if banned:
+            yield event.plain_result(f"⚠️ 命令中包含禁止物品 [{banned}]，申请自动驳回")
+            return
+        gid = self._get_group_id(event)
+        desc = f"{p['mc_id']} 申请: {rcon_cmd}"
+        comp_id = self.db.add_compensation(qq_id, p["mc_id"], gid, rcon_cmd, desc)
         if self.pdb_comp_admin:
-            yield event.plain_result(f"📝 补偿申请已提交 (#{comp_id})，请等待管理员审批\n内容: {desc}")
+            yield event.plain_result(f"📝 补偿申请已提交 (#{comp_id})\n命令: {rcon_cmd}\n请等待管理员审批")
         else:
             self.db.update_compensation(comp_id, "approved")
-            yield event.plain_result(f"✅ 补偿申请已自动通过 (#{comp_id})\n内容: {desc}")
+            yield event.plain_result(f"✅ 补偿申请已自动通过 (#{comp_id})\n命令: {rcon_cmd}")
 
     @filter.command("comp_list", desc="查看补偿申请列表")
     async def cmd_comp_list(self, event: AstrMessageEvent):
@@ -1050,10 +1070,11 @@ class MrconPlugin(Star):
             return
         lines = ["📋 待处理补偿申请:"]
         for c in pending[:10]:
-            lines.append(f"  #{c['id']} {c['mc_id']}({c['qq_id']}): {c['description'][:50]}")
+            lines.append(f"  #{c['id']} {c['mc_id']}({c['qq_id']}): {c.get('rcon_cmd', c.get('description', ''))[:60]}")
+        lines.append("使用 /comp_approve <ID> 批准 或 /comp_reject <ID> 拒绝")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("comp_approve", desc="批准补偿申请")
+    @filter.command("comp_approve", desc="批准补偿并执行RCON")
     async def cmd_comp_approve(self, event: AstrMessageEvent, comp_id: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可审批")
@@ -1063,8 +1084,29 @@ class MrconPlugin(Star):
         except ValueError:
             yield event.plain_result("用法: /comp_approve <申请ID>")
             return
+        comp = self.db.get_compensation(cid)
+        if not comp:
+            yield event.plain_result(f"未找到申请 #{cid}")
+            return
+        if comp.get("status") != "pending":
+            yield event.plain_result(f"申请 #{cid} 已处理")
+            return
+        rcon_cmd = comp.get("rcon_cmd", "")
+        if not rcon_cmd:
+            yield event.plain_result(f"申请 #{cid} 无有效命令")
+            return
         self.db.update_compensation(cid, "approved")
-        yield event.plain_result(f"✅ 已批准补偿申请 #{cid}")
+        yield event.plain_result(f"✅ 已批准 #{cid}，正在执行 `{rcon_cmd}` ...")
+        gid = comp.get("group_id", "") or self._get_group_id(event)
+        conf = self.group_map.get(gid)
+        if not conf:
+            confs = self.group_servers.get(gid) if gid else None
+            conf = (confs[0] if confs and len(confs) == 1 else None)
+        if not conf:
+            yield event.plain_result(f"⚠️ 申请所在群未配置服务器，无法自动执行")
+            return
+        async for msg in self._execute_on_conf(event, conf, rcon_cmd, f"补偿#{cid}"):
+            yield msg
 
     @filter.command("comp_reject", desc="拒绝补偿申请")
     async def cmd_comp_reject(self, event: AstrMessageEvent, comp_id: str = ""):
@@ -1075,6 +1117,10 @@ class MrconPlugin(Star):
             cid = int(comp_id)
         except ValueError:
             yield event.plain_result("用法: /comp_reject <申请ID>")
+            return
+        comp = self.db.get_compensation(cid)
+        if not comp:
+            yield event.plain_result(f"未找到申请 #{cid}")
             return
         self.db.update_compensation(cid, "rejected")
         yield event.plain_result(f"❌ 已拒绝补偿申请 #{cid}")

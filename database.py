@@ -48,11 +48,21 @@ class Database:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         qq_id TEXT NOT NULL,
                         mc_id TEXT NOT NULL,
+                        group_id TEXT DEFAULT '',
+                        rcon_cmd TEXT NOT NULL,
                         description TEXT NOT NULL,
                         time INTEGER NOT NULL,
                         status TEXT DEFAULT 'pending'
                     );
                 """)
+                try:
+                    conn.execute("ALTER TABLE compensations ADD COLUMN rcon_cmd TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE compensations ADD COLUMN group_id TEXT DEFAULT ''")
+                except sqlite3.OperationalError:
+                    pass
                 conn.commit()
             finally:
                 conn.close()
@@ -203,16 +213,25 @@ class Database:
             finally:
                 conn.close()
 
-    def add_compensation(self, qq_id: str, mc_id: str, desc: str) -> int:
+    def add_compensation(self, qq_id: str, mc_id: str, group_id: str, rcon_cmd: str, desc: str) -> int:
         with self._lock:
             conn = self._connect()
             try:
                 cur = conn.execute(
-                    "INSERT INTO compensations (qq_id, mc_id, description, time, status) VALUES (?, ?, ?, ?, 'pending')",
-                    (str(qq_id), str(mc_id), str(desc), int(time.time())),
+                    "INSERT INTO compensations (qq_id, mc_id, group_id, rcon_cmd, description, time, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                    (str(qq_id), str(mc_id), str(group_id), str(rcon_cmd), str(desc), int(time.time())),
                 )
                 conn.commit()
                 return cur.lastrowid
+            finally:
+                conn.close()
+
+    def get_compensation(self, comp_id: int) -> dict:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute("SELECT * FROM compensations WHERE id=?", (comp_id,)).fetchone()
+                return dict(row) if row else {}
             finally:
                 conn.close()
 

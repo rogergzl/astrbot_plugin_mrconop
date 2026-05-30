@@ -104,8 +104,9 @@
       "checkin_points": { "description": "每日签到积分", "type": "int", "default": 10 },
       "checkin_streak_bonus": { "description": "连续签到额外积分", "type": "int", "hint": "每多连续一天额外奖励的积分", "default": 2 },
       "new_player_points": { "description": "新玩家奖励积分", "type": "int", "hint": "首次绑定 MC ID 时赠送", "default": 50 },
-      "compensation_enabled": { "description": "启用物品丢失补偿申请", "type": "bool", "hint": "开启后玩家可通过 /compensate 申请补偿", "default": false },
-      "compensation_require_admin": { "description": "补偿需管理员审批", "type": "bool", "default": true }
+      "compensation_enabled": { "description": "启用物品丢失补偿申请", "type": "bool", "hint": "开启后白名单玩家可通过 /comp <RCON命令> 申请补偿。限白名单用户使用", "default": false },
+      "compensation_require_admin": { "description": "补偿需管理员审批", "type": "bool", "default": true },
+      "compensation_blacklist": { "description": "补偿命令黑名单（全词匹配）", "type": "list", "items": { "type": "string" }, "hint": "命令中任一单词完整命中即驳回。例：填入 mingling_fangkuai 则 give @a mingling_fangkuai 被拒", "default": [] }
     }
   },
   "macro_definitions": {
