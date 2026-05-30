@@ -42,7 +42,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "mrcon-plugin-author", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.1.0")
+@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.1.0")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化

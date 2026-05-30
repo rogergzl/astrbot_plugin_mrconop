@@ -1,5 +1,8 @@
 # mrcon — MC 综合管理插件
 
+[![GitHub](https://img.shields.io/badge/GitHub-rogergzl%2Fastrbot__plugin__mrconop-blue?logo=github)](https://github.com/rogergzl/astrbot_plugin_mrconop)
+![Version](https://img.shields.io/badge/version-v3.1.0-green)
+
 RCON 命令转发 + 服务器并发查询 + SQLite 玩家数据库 + 会话级在线追踪 + 签到 + 补偿 + 群服消息互联（RCON tellraw）
 
 ## 安装
@@ -237,3 +240,7 @@ mrcon/
 ## 审计日志
 
 位置：`data/plugin_data/mrcon/audit.log`
+
+---
+
+> ⚠️ **免责声明**：本插件代码由 AI 辅助生成，亲测可用。功能更新随缘，不保证长期维护。如遇问题请提 [Issue](https://github.com/rogergzl/astrbot_plugin_mrconop/issues)。
