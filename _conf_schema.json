@@ -1,0 +1,131 @@
+{
+  "admin": {
+    "description": "管理员与安全配置",
+    "type": "object",
+    "obvious_hint": true,
+    "items": {
+      "bot_admin_qqs": {
+        "description": "Bot 全局管理员 QQ 列表",
+        "type": "list",
+        "items": { "type": "string" },
+        "hint": "管理员可使用所有 RCON 命令，不受白名单限制",
+        "default": []
+      },
+      "dangerous_commands_blacklist": {
+        "description": "危险命令黑名单（子串匹配）",
+        "type": "list",
+        "items": { "type": "string" },
+        "hint": "非管理员执行时，命令中匹配任一子串则拒绝。如 stop、restart、op",
+        "default": []
+      },
+      "rate_limit": {
+        "description": "智能速率限制配置",
+        "type": "object",
+        "obvious_hint": true,
+        "hint": "统计窗口内命令过多时自动加大间隔，冷却后自动恢复",
+        "items": {
+          "enabled": { "description": "启用速率限制", "type": "bool", "default": false },
+          "base_interval_ms": { "description": "基础间隔（毫秒）", "type": "int", "default": 1000 },
+          "window_minutes": { "description": "统计窗口（分钟）", "type": "int", "default": 5 },
+          "threshold_count": { "description": "触发阈值（条/窗口）", "type": "int", "default": 10 },
+          "increment_ms": { "description": "递增步长（毫秒）", "type": "int", "default": 500 },
+          "max_interval_ms": { "description": "最大间隔上限（毫秒）", "type": "int", "default": 10000 },
+          "auto_recovery": { "description": "自动恢复基础速率", "type": "bool", "default": true },
+          "recovery_minutes": { "description": "恢复冷却时间（分钟）", "type": "int", "default": 10 }
+        }
+      }
+    }
+  },
+  "general": {
+    "description": "通用与脚本设置",
+    "type": "object",
+    "obvious_hint": true,
+    "items": {
+      "select_ttl": {
+        "description": "多服务器选择超时（秒）",
+        "type": "int",
+        "hint": "一个群配置多个 RCON 服务器时，用户选择编号的超时时间",
+        "default": 30
+      },
+      "scripts_dir": {
+        "description": "脚本存放目录（相对数据目录）",
+        "type": "string",
+        "hint": "rcscript 命令读取脚本的目录路径",
+        "default": "scripts"
+      }
+    }
+  },
+  "query": {
+    "description": "服务器查询显示设置（原 mcing 功能）",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "控制 /mc 查询结果的显示内容。0=显示 1=隐藏",
+    "items": {
+      "show_address_port": { "description": "显示地址端口", "type": "bool", "default": true },
+      "show_version": { "description": "显示版本", "type": "bool", "default": true },
+      "show_latency": { "description": "显示延迟", "type": "bool", "default": true },
+      "show_online_count": { "description": "显示在线人数", "type": "bool", "default": true },
+      "show_players_detail": { "description": "显示玩家列表", "type": "bool", "default": true },
+      "render_online_image": { "description": "在线列表渲染为图片", "type": "bool", "hint": "开启后在线玩家列表以图片形式发送", "default": false },
+      "auto_cleanup_days": { "description": "自动清理失效服务器天数", "type": "int", "hint": "超过此天数未成功查询的服务器自动删除。0 表示不自动清理", "default": 10 }
+    }
+  },
+  "online_tracker": {
+    "description": "玩家在线时长监控",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "定时查询在线玩家，记录在线时长",
+    "items": {
+      "enabled": { "description": "启用在线时长监控", "type": "bool", "default": false },
+      "poll_interval_seconds": { "description": "轮询间隔（秒）", "type": "int", "hint": "每隔多少秒查询一次在线列表", "default": 60 },
+      "query_method": { "description": "查询方式", "type": "string", "options": ["rcon", "mcstatus"], "hint": "rcon=通过RCON list命令, mcstatus=通过MC协议查询", "default": "rcon" }
+    }
+  },
+  "relay": {
+    "description": "群服消息互联",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "将群聊消息转发到 MC 服务器，或将服务器消息转发到群聊",
+    "items": {
+      "enabled": { "description": "启用群服消息互联", "type": "bool", "default": false },
+      "group_to_mc": { "description": "群聊消息 → MC", "type": "bool", "hint": "群内非命令消息转发到服务器 chat", "default": true },
+      "mc_to_group": { "description": "MC 消息 → 群聊", "type": "bool", "hint": "服务器聊天消息转发到对应群（需 RCON tail 支持）", "default": false },
+      "format_group": { "description": "群→MC 消息格式", "type": "string", "hint": "{name}=群昵称, {msg}=消息内容", "default": "[QQ] {name}: {msg}" },
+      "format_mc": { "description": "MC→群 消息格式", "type": "string", "hint": "{player}=玩家名, {msg}=消息内容", "default": "[MC] {player}: {msg}" }
+    }
+  },
+  "player_db": {
+    "description": "玩家数据库与签到",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "玩家账号关联、签到、活动奖励、物品补偿等基础设置",
+    "items": {
+      "enabled": { "description": "启用玩家数据库", "type": "bool", "default": false },
+      "checkin_points": { "description": "每日签到积分", "type": "int", "default": 10 },
+      "checkin_streak_bonus": { "description": "连续签到额外积分", "type": "int", "hint": "每多连续一天额外奖励的积分", "default": 2 },
+      "new_player_points": { "description": "新玩家奖励积分", "type": "int", "hint": "首次绑定 MC ID 时赠送", "default": 50 },
+      "compensation_enabled": { "description": "启用物品丢失补偿申请", "type": "bool", "hint": "开启后玩家可通过 /compensate 申请补偿", "default": false },
+      "compensation_require_admin": { "description": "补偿需管理员审批", "type": "bool", "default": true }
+    }
+  },
+  "macro_definitions": {
+    "description": "宏命令定义列表",
+    "type": "list",
+    "items": {
+      "type": "object",
+      "properties": {
+        "name": { "description": "宏名称", "type": "string" },
+        "commands": { "description": "命令列表", "type": "list", "items": { "type": "string" } }
+      }
+    },
+    "default": []
+  },
+  "servers": {
+    "description": "RCON 服务器槽位 — 每个对象绑定一个群和一台 MC 服务器。可自由增减，JSON 格式编辑所有字段。",
+    "type": "string",
+    "hint": "JSON 数组。每元素含：group_id, name, rcon_host, rcon_port(默认25575), rcon_password, game_port(默认25565), whitelist_qqs(数组), public_commands(数组), vote_enabled(bool), vote_threshold(int), vote_ttl(int), vote_min_agree_on_timeout(int), vote_tie_strategy(fail/pass/admin), admin_decide_ttl(int), relay_enabled(bool), query_enabled(bool)。\n\n示例：\n[\n  {\n    \"group_id\": \"123456789\",\n    \"name\": \"生存一区\",\n    \"rcon_host\": \"127.0.0.1\",\n    \"rcon_port\": \"25575\",\n    \"rcon_password\": \"your_rcon_pwd\",\n    \"game_port\": \"25565\",\n    \"whitelist_qqs\": [\"111\"],\n    \"public_commands\": [\"list\", \"say\"],\n    \"vote_enabled\": false,\n    \"vote_threshold\": 3,\n    \"vote_ttl\": 60,\n    \"vote_min_agree_on_timeout\": 1,\n    \"vote_tie_strategy\": \"fail\",\n    \"admin_decide_ttl\": 120,\n    \"relay_enabled\": false,\n    \"query_enabled\": true\n  }\n]",
+    "default": "[]",
+    "editor_mode": true,
+    "editor_language": "json"
+  }
+}
