@@ -42,7 +42,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.1.0")
+@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.1.1")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化
@@ -564,10 +564,10 @@ class MrconPlugin(Star):
         gpath = os.path.join(self.plugin_data_dir, f"mcserv_{group_id}.json")
         safe_json_write(gpath, data)
 
-    async def _get_mc_server_status(self, host: str, port: int):
+    async def _get_mc_server_status(self, host: str, port: str):
         try:
             from mcstatus import JavaServer
-            addr = f"{host}:{port}"
+            addr = f"{host}:{port}" if port else host
             server = await asyncio.wait_for(JavaServer.async_lookup(addr), timeout=5.0)
             status = await asyncio.wait_for(server.async_status(), timeout=5.0)
             players_list = []
@@ -586,23 +586,25 @@ class MrconPlugin(Star):
         except Exception:
             return {"online": False}
 
-    def _format_server_status(self, name: str, host: str, port: int, status: dict) -> str:
-        lines = [f"🖥️ {name}"]
+    def _format_server_status(self, name: str, host: str, port: str, status: dict) -> str:
+        addr = f"{host}:{port}" if port else host
+        lines = [f"🖥️ 服务器：{name}"]
         if self.query_show_addr:
-            lines.append(f"📍 {host}:{port}")
+            lines.append(f"📍 地址：{addr}")
         if not status["online"]:
-            lines.append("🔴 离线或查询超时")
+            lines.append("🔴 状态：离线或查询超时")
             return "\n".join(lines)
+        lines.append("🟢 状态：在线")
         if self.query_show_ver:
-            lines.append(f"📦 {status['version']}")
+            lines.append(f"📦 版本：{status['version']}")
         if self.query_show_latency:
-            lines.append(f"📶 {status['latency']}ms")
+            lines.append(f"📶 延迟：{status['latency']}ms")
         if self.query_show_count:
-            lines.append(f"👥 {status['players_online']}/{status['players_max']}")
+            lines.append(f"👥 人数：{status['players_online']}/{status['players_max']}")
         if self.query_show_players and status["players_online"] > 0:
-            lines.append(f"🎮 {', '.join(status['players'])}")
+            lines.append(f"🎮 在线玩家：{', '.join(status['players'])}")
         elif self.query_show_players:
-            lines.append("🎮 暂无在线玩家")
+            lines.append("🎮 在线玩家：暂无")
         return "\n".join(lines)
 
     # ==============================================================
@@ -622,7 +624,7 @@ class MrconPlugin(Star):
                 pass
         elif method == "mcstatus":
             try:
-                st = await self._get_mc_server_status(conf["rcon_host"], conf.get("game_port", 25565))
+                st = await self._get_mc_server_status(conf["rcon_host"], str(conf.get("game_port", 25565)))
                 if st["online"]:
                     return st["players"]
             except Exception:
@@ -690,11 +692,7 @@ class MrconPlugin(Star):
         tasks = {}
         for sname, info in servers_dict.items():
             host = info.get("host", "")
-            port_str = str(info.get("port", "25565") or "25565")
-            try:
-                port = int(port_str)
-            except ValueError:
-                port = 25565
+            port = str(info.get("port", "") or "")
             tasks[sname] = asyncio.create_task(self._get_mc_server_status(host, port))
         results = []
         for sname, task in tasks.items():
@@ -704,11 +702,7 @@ class MrconPlugin(Star):
                 status = {"online": False}
             info = servers_dict[sname]
             host = info.get("host", "")
-            port_str = str(info.get("port", "25565") or "25565")
-            try:
-                port = int(port_str)
-            except ValueError:
-                port = 25565
+            port = str(info.get("port", "") or "")
             results.append((sname, host, port, status))
         if len(results) == 1:
             sname, host, port, status = results[0]
@@ -738,11 +732,7 @@ class MrconPlugin(Star):
             yield event.plain_result(f"未找到服务器: {name}")
             return
         host = info.get("host", "")
-        port_str = str(info.get("port", "25565") or "25565")
-        try:
-            port = int(port_str)
-        except ValueError:
-            port = 25565
+        port = str(info.get("port", "") or "")
         status = await self._get_mc_server_status(host, port)
         yield event.plain_result(self._format_server_status(name, host, port, status))
 
@@ -757,8 +747,9 @@ class MrconPlugin(Star):
         lines = ["📋 本群 MC 服务器列表:"]
         for sname, info in servers_dict.items():
             host = info.get("host", "")
-            port = info.get("port", "25565")
-            lines.append(f"  • {sname} → {host}:{port}")
+            port = str(info.get("port", "") or "")
+            display_addr = f"{host}:{port}" if port else host
+            lines.append(f"  • {sname} → {display_addr}")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("mcadd", desc="添加MC服务器")
@@ -776,7 +767,7 @@ class MrconPlugin(Star):
             return
         parts = addr.split(":")
         host = parts[0]
-        port = parts[1] if len(parts) > 1 else "25565"
+        port = parts[1] if len(parts) > 1 else ""
         data.setdefault("servers", {})
         data["servers"][name] = {
             "name": name,
@@ -786,7 +777,8 @@ class MrconPlugin(Star):
             "last_success_time": int(time.time()),
         }
         self._save_group_serv_data(gid, data)
-        yield event.plain_result(f"✅ 已添加服务器: {name} ({host}:{port})")
+        display_addr = f"{host}:{port}" if port else host
+        yield event.plain_result(f"✅ 已添加服务器: {name} ({display_addr})")
 
     @filter.command("mcdel", desc="删除MC服务器")
     async def cmd_mcdel(self, event: AstrMessageEvent, name: str = ""):
@@ -828,7 +820,7 @@ class MrconPlugin(Star):
         if new_addr:
             parts = new_addr.split(":")
             data["servers"][name]["host"] = parts[0]
-            data["servers"][name]["port"] = parts[1] if len(parts) > 1 else "25565"
+            data["servers"][name]["port"] = parts[1] if len(parts) > 1 else ""
         self._save_group_serv_data(gid, data)
         yield event.plain_result(f"✅ 已更新服务器: {name}")
 
