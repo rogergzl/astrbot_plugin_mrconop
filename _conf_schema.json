@@ -74,11 +74,20 @@
     "description": "玩家在线时长监控",
     "type": "object",
     "obvious_hint": true,
-    "hint": "定时查询在线玩家，记录在线时长",
+    "hint": "定时查询在线玩家，记录在线时长；可配置时长提醒与超时自动踢出",
     "items": {
       "enabled": { "description": "启用在线时长监控", "type": "bool", "default": false },
       "poll_interval_seconds": { "description": "轮询间隔（秒）", "type": "int", "hint": "每隔多少秒查询一次在线列表", "default": 60 },
-      "query_method": { "description": "查询方式", "type": "string", "options": ["rcon", "mcstatus"], "hint": "rcon=通过RCON list命令, mcstatus=通过MC协议查询", "default": "rcon" }
+      "query_method": { "description": "查询方式", "type": "string", "options": ["rcon", "mcstatus"], "hint": "rcon=通过RCON list命令, mcstatus=通过MC协议查询", "default": "rcon" },
+      "notify_enabled": { "description": "启用在线时长提醒", "type": "bool", "hint": "玩家达到设定时长节点时发送提醒", "default": false },
+      "notify_target": { "description": "提醒发送目标", "type": "string", "options": ["group", "admin_dm"], "hint": "group=发到群内, admin_dm=私聊管理员(附带群名)", "default": "group" },
+      "notify_intervals": { "description": "提醒时长节点（分钟）", "type": "list", "items": { "type": "int" }, "hint": "玩家连续在线达到这些时长时提醒，如 [60, 120, 360]", "default": [60, 120, 360] },
+      "notify_in_game": { "description": "在游戏内同步提醒", "type": "bool", "hint": "通过RCON say命令在游戏公屏提醒玩家", "default": false },
+      "notify_game_format": { "description": "游戏内提醒格式", "type": "string", "hint": "{player}=玩家名 {duration}=时长, RCON say命令发送", "default": "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！" },
+      "auto_kick_enabled": { "description": "启用超时自动踢出", "type": "bool", "hint": "玩家单次在线超过阈值时自动踢出", "default": false },
+      "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 720 },
+      "auto_kick_reason": { "description": "踢出原因文本", "type": "string", "hint": "支持 {player} 占位符替换为玩家名", "default": "你已连续在线过久，请休息一下！" },
+      "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 }
     }
   },
   "relay": {
@@ -104,7 +113,8 @@
       "checkin_points": { "description": "每日签到积分", "type": "int", "default": 10 },
       "checkin_streak_bonus": { "description": "连续签到额外积分", "type": "int", "hint": "每多连续一天额外奖励的积分", "default": 2 },
       "new_player_points": { "description": "新玩家奖励积分", "type": "int", "hint": "首次绑定 MC ID 时赠送", "default": 50 },
-      "compensation_enabled": { "description": "启用物品丢失补偿申请", "type": "bool", "hint": "开启后白名单玩家可通过 /comp <RCON命令> 申请补偿。限白名单用户使用", "default": false },
+      "compensation_enabled": { "description": "补偿模式", "type": "bool", "hint": "开 = 全局可用（任何人可申请）；关 = 仅白名单可用", "default": false },
+      "compensation_whitelist": { "description": "补偿白名单 QQ 列表", "type": "list", "items": { "type": "string" }, "hint": "compensation_enabled=false 时仅列表中 QQ 可用。与服务器白名单独立", "default": [] },
       "compensation_require_admin": { "description": "补偿需管理员审批", "type": "bool", "default": true },
       "compensation_blacklist": { "description": "补偿命令黑名单（全词匹配）", "type": "list", "items": { "type": "string" }, "hint": "命令中任一单词完整命中即驳回。例：填入 mingling_fangkuai 则 give @a mingling_fangkuai 被拒", "default": [] }
     }
@@ -128,5 +138,18 @@
     "default": "[]",
     "editor_mode": true,
     "editor_language": "json"
+  },
+  "web_panel": {
+    "description": "Web 管理面板（端口9949 图形化配置）",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "启用后在浏览器中管理所有配置：仪表盘、服务器管理（含投票）、群服互联、在线追踪、玩家搜索、补偿审批、在线列表、审计日志、宏命令、脚本、全局设置",
+    "items": {
+      "enabled": { "description": "启用 Web 管理面板", "type": "bool", "hint": "开启后自动启动 HTTP 服务（端口见下方）。基于原生 asyncio TCP，无需额外安装依赖", "default": false },
+      "host": { "description": "监听地址", "type": "string", "hint": "0.0.0.0=监听所有网卡（推荐）。127.0.0.1=仅本机访问", "default": "0.0.0.0" },
+      "port": { "description": "监听端口", "type": "int", "hint": "HTTP 服务端口号，默认 9949", "default": 9949 },
+      "password": { "description": "WebUI 登录密码", "type": "string", "hint": "留空则无需密码即可访问面板（仅内网使用）。设置后将使用 PBKDF2-SHA256 加密存储", "default": "" },
+      "session_timeout": { "description": "会话超时（秒）", "type": "int", "hint": "登录后无操作/后台多久自动登出，默认 600（10分钟）", "default": 600 }
+    }
   }
 }

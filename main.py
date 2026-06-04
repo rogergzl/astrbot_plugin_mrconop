@@ -5,6 +5,7 @@ import re
 import time
 from pathlib import Path
 from collections import defaultdict
+
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
@@ -42,7 +43,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件（RCON+查询+SQLite+继电器）", "3.2.0")
+@register("mrcon", "lindagao", "MC 综合管理插件", "3.9.6")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化
@@ -55,6 +56,18 @@ class MrconPlugin(Star):
         if not isinstance(admin_cfg, dict):
             admin_cfg = {}
         self.admin_qqs = set(admin_cfg.get("bot_admin_qqs", []) or [])
+
+        # ---- Web 管理面板配置 ----
+        web_cfg = self.config.get("web_panel", {})
+        if not isinstance(web_cfg, dict):
+            web_cfg = {}
+        self.web_panel_enabled = bool(web_cfg.get("enabled", False))
+        self.web_panel_host = str(web_cfg.get("host", "0.0.0.0") or "0.0.0.0")
+        self.web_panel_port = int(web_cfg.get("port", 9949) or 9949)
+        self.web_panel_password = str(web_cfg.get("password", "") or "")
+        self.web_panel_session_timeout = int(web_cfg.get("session_timeout", 600) or 600)
+        self._web_panel = None  # 延迟初始化
+        self._web_panel_task = None
 
         general_cfg = self.config.get("general", {})
         if not isinstance(general_cfg, dict):
@@ -91,6 +104,22 @@ class MrconPlugin(Star):
         self.tracker_enabled = bool(tracker_cfg.get("enabled", False))
         self.tracker_interval = int(tracker_cfg.get("poll_interval_seconds", 60) or 60)
         self.tracker_method = str(tracker_cfg.get("query_method", "rcon") or "rcon")
+        self.tracker_notify = bool(tracker_cfg.get("notify_enabled", False))
+        self.tracker_notify_target = str(tracker_cfg.get("notify_target", "group") or "group")
+        self.tracker_notify_intervals = sorted(
+            [int(x) for x in (tracker_cfg.get("notify_intervals", [60, 120, 360]) or [])], reverse=True
+        )
+        self.tracker_kick_enabled = bool(tracker_cfg.get("auto_kick_enabled", False))
+        self.tracker_kick_threshold = int(tracker_cfg.get("auto_kick_threshold", 720) or 720)
+        self.tracker_kick_reason = str(tracker_cfg.get("auto_kick_reason", "你已连续在线过久，请休息一下！") or "")
+        self.tracker_notify_game = bool(tracker_cfg.get("notify_in_game", False))
+        self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！") or "")
+        self.tracker_ban_minutes = int(tracker_cfg.get("auto_kick_ban_minutes", 30) or 30)
+        self._pending_msgs = {}     # gid → [(msg, group_name)]
+        self._last_umo = {}         # gid → unified_msg_origin
+        self._tracker_overrides = {}  # gid → {notify_enabled, notify_target, notify_intervals, kick_enabled, kick_threshold, kick_reason}
+        self._pending_unbans = {}   # player_key → (unban_time, conf)
+        self._relay_overrides = {}   # gid → {enabled, format_group, server_name, ...}
 
         relay_cfg = self.config.get("relay", {})
         if not isinstance(relay_cfg, dict):
@@ -109,6 +138,7 @@ class MrconPlugin(Star):
         self.pdb_streak_bonus = int(player_db_cfg.get("checkin_streak_bonus", 2) or 2)
         self.pdb_new_pts = int(player_db_cfg.get("new_player_points", 50) or 50)
         self.pdb_comp_enabled = bool(player_db_cfg.get("compensation_enabled", False))
+        self.pdb_comp_whitelist = set(str(x) for x in player_db_cfg.get("compensation_whitelist", []))
         self.pdb_comp_admin = bool(player_db_cfg.get("compensation_require_admin", True))
         self.pdb_comp_blacklist = list(player_db_cfg.get("compensation_blacklist", []))
 
@@ -221,6 +251,7 @@ class MrconPlugin(Star):
         self.db = Database(self.db_path)
         self.db.migrate_from_json(self.player_db_path, self.online_sessions_path)
         self._online_cache = {}
+        self._last_online_refresh = 0
         self._tracker_task = None
 
     async def initialize(self):
@@ -231,8 +262,30 @@ class MrconPlugin(Star):
             pass
         if self.tracker_enabled:
             self._tracker_task = asyncio.create_task(self._online_tracker_loop())
+        # 启动 Web 管理面板
+        if self.web_panel_enabled:
+            try:
+                from .web_panel import WebServer
+                self._web_panel = WebServer(self, host=self.web_panel_host, port=self.web_panel_port, session_timeout=self.web_panel_session_timeout)
+                if self.web_panel_password and not self._web_panel.is_password_configured():
+                    self._web_panel.set_password(self.web_panel_password)
+                self._web_panel_task = asyncio.create_task(self._web_panel.run())
+            except Exception as e:
+                logger.warning(f"[mrcon] Web 面板启动失败: {e}")
 
     async def terminate(self):
+        if self._web_panel_task:
+            self._web_panel_task.cancel()
+            try:
+                await asyncio.wait_for(self._web_panel_task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+            self._web_panel_task = None
+        if self._web_panel:
+            try:
+                await self._web_panel.stop()
+            except Exception:
+                pass
         if self._tracker_task:
             self._tracker_task.cancel()
             self._tracker_task = None
@@ -368,7 +421,7 @@ class MrconPlugin(Star):
         return False
 
     def _extract_full_after_cmd(self, event: AstrMessageEvent, fallback: str) -> str:
-        cmd_names = ["/mrcon", "/mcmd", "mrcon", "mcmd"]
+        cmd_names = ["/mrcon", "/执行", "/mcmd", "mrcon", "执行", "mcmd"]
         raw_candidates = []
         for name in [
             "get_message_text", "get_plain_text", "get_text", "get_raw_text",
@@ -441,7 +494,7 @@ class MrconPlugin(Star):
         if raw_candidates:
             raw = max(raw_candidates, key=len)
         text = str(raw or "").strip()
-        patterns = [r"^.*?(?:/mrcon|mrcon|/mcmd|mcmd)\s+(.+)$"]
+        patterns = [r"^.*?(?:/mrcon|mrcon|/执行|执行|/mcmd|mcmd)\s+(.+)$"]
         for pat in patterns:
             m = re.match(pat, text, flags=re.IGNORECASE | re.DOTALL)
             if m:
@@ -632,6 +685,21 @@ class MrconPlugin(Star):
                 pass
         return []
 
+    def _get_tracker_config(self, gid: str) -> dict:
+        """获取某群的在线监控配置，优先群内覆盖，否则回退全局"""
+        override = self._tracker_overrides.get(str(gid), {})
+        return {
+            "notify": override.get("notify_enabled", self.tracker_notify),
+            "notify_target": override.get("notify_target", self.tracker_notify_target),
+            "notify_intervals": override.get("notify_intervals", self.tracker_notify_intervals),
+            "notify_game": override.get("notify_in_game", self.tracker_notify_game),
+            "notify_game_format": override.get("notify_game_format", self.tracker_game_format),
+            "kick_enabled": override.get("kick_enabled", self.tracker_kick_enabled),
+            "kick_threshold": override.get("kick_threshold", self.tracker_kick_threshold),
+            "kick_reason": override.get("kick_reason", self.tracker_kick_reason),
+            "ban_minutes": override.get("ban_minutes", self.tracker_ban_minutes),
+        }
+
     async def _online_tracker_loop(self):
         logger.info("[mrcon] 在线时长监控已启动")
         while True:
@@ -645,12 +713,83 @@ class MrconPlugin(Star):
                 for gid, conf in all_servers:
                     if not conf.get("query_enabled", True):
                         continue
+                    tcfg = self._get_tracker_config(gid)
                     online = await self._get_online_player_list(conf)
                     srv_name = conf.get("server_name", "unknown")
+                    # 检查到期解封
+                    for key in list(self._pending_unbans.keys()):
+                        ub = self._pending_unbans[key]
+                        if now >= ub["unban_at"]:
+                            try:
+                                await rcon_command(
+                                    ub["conf"]["rcon_host"], ub["conf"]["rcon_port"],
+                                    ub["conf"]["rcon_password"], f"pardon {ub['player']}",
+                                )
+                                logger.info(f"[mrcon] 自动解封 {ub['player']} @ {ub['conf'].get('server_name', '?')}")
+                            except Exception:
+                                pass
+                            del self._pending_unbans[key]
                     for player in online:
                         sid = f"{srv_name}:{player}"
                         if sid not in self._online_cache:
-                            self._online_cache[sid] = {"login_at": now, "player": player, "server": srv_name}
+                            self._online_cache[sid] = {
+                                "login_at": now, "player": player, "server": srv_name,
+                                "gid": gid, "notified": set(), "kicked": False,
+                            }
+                        cache = self._online_cache[sid]
+                        session_mins = (now - cache["login_at"]) // 60
+                        # 通知检查（群内 + 游戏内）
+                        if tcfg["notify"]:
+                            intervals = sorted(tcfg["notify_intervals"], reverse=True)
+                            for threshold in intervals:
+                                if session_mins >= threshold and threshold not in cache["notified"]:
+                                    cache["notified"].add(threshold)
+                                    h = threshold // 60
+                                    m = threshold % 60
+                                    if h > 0:
+                                        dur_text = f"{h}时{m}分" if m else f"{h}小时"
+                                    else:
+                                        dur_text = f"{m}分钟"
+                                    msg = f"⏰ {player} 已在 [{srv_name}] 连续在线 {dur_text}"
+                                    self._pending_msgs.setdefault(str(gid), []).append(msg)
+                                    # 游戏内提醒
+                                    if tcfg["notify_game"]:
+                                        game_msg = tcfg["notify_game_format"].replace("{player}", player).replace("{duration}", dur_text)
+                                        try:
+                                            await rcon_command(
+                                                conf["rcon_host"], conf["rcon_port"],
+                                                conf["rcon_password"], f"say {game_msg}",
+                                            )
+                                        except Exception as e:
+                                            logger.error(f"[mrcon] 游戏内提醒失败: {e}")
+                        # 踢出检查 + 封禁
+                        if tcfg["kick_enabled"] and not cache["kicked"] and session_mins >= tcfg["kick_threshold"]:
+                            cache["kicked"] = True
+                            reason = tcfg["kick_reason"].replace("{player}", player)
+                            kick_cmd = f"kick {player} {reason}"
+                            try:
+                                await rcon_command(
+                                    conf["rcon_host"], conf["rcon_port"],
+                                    conf["rcon_password"], kick_cmd,
+                                )
+                                logger.info(f"[mrcon] 自动踢出 {player} @ {srv_name}: {reason}")
+                                msg = f"🚫 {player} 连续在线超过 {tcfg['kick_threshold']} 分钟，已被自动踢出 [{srv_name}]"
+                                # 踢出后封禁
+                                ban_mins = tcfg["ban_minutes"]
+                                if ban_mins > 0:
+                                    await rcon_command(
+                                        conf["rcon_host"], conf["rcon_port"],
+                                        conf["rcon_password"], f"ban {player} {reason}",
+                                    )
+                                    self._pending_unbans[f"{srv_name}:{player}"] = {
+                                        "unban_at": now + ban_mins * 60,
+                                        "player": player, "conf": conf,
+                                    }
+                                    msg += f"，已封禁 {ban_mins} 分钟"
+                            except Exception as e:
+                                logger.error(f"[mrcon] 自动踢出失败: {e}")
+                                msg = f"⚠️ {player} 超时需踢出但执行失败 [{srv_name}]: {e}"
+                            self._pending_msgs.setdefault(str(gid), []).append(msg)
                     for sid in list(self._online_cache.keys()):
                         s = self._online_cache[sid]
                         if s["server"] == srv_name and s["player"] not in online:
@@ -673,8 +812,8 @@ class MrconPlugin(Star):
     def _get_player(self, qq_id: str) -> dict:
         return self.db.get_player(str(qq_id)) or None
 
-    def _ensure_player(self, qq_id: str, mc_id: str = "") -> dict:
-        return self.db.ensure_player(str(qq_id), mc_id)
+    def _ensure_player(self, qq_id: str) -> dict:
+        return self.db.ensure_player(str(qq_id))
 
     def _update_player(self, qq_id: str, updates: dict):
         self.db.update_player(str(qq_id), updates)
@@ -682,7 +821,7 @@ class MrconPlugin(Star):
     # ==============================================================
     # MC 查询命令
     # ==============================================================
-    @filter.command("mc", desc="查询所有MC服务器状态")
+    @filter.command("mc", desc="查询所有MC服务器状态", alias={"查询"})
     async def cmd_mc(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
         data = self._get_group_serv_data(gid)
@@ -720,7 +859,7 @@ class MrconPlugin(Star):
         for sname, host, port, s in results:
             yield event.plain_result(self._format_server_status(sname, host, port, s))
 
-    @filter.command("mcget", desc="查询单个服务器详情")
+    @filter.command("mcget", desc="查询单个服务器详情", alias={"服详情"})
     async def cmd_mcget(self, event: AstrMessageEvent, name: str = ""):
         if not name:
             yield event.plain_result("用法: /mcget <服务器名称>")
@@ -737,7 +876,7 @@ class MrconPlugin(Star):
         status = await self._get_mc_server_status(host, port)
         yield event.plain_result(self._format_server_status(name, host, port, status))
 
-    @filter.command("mclist", desc="列出所有MC服务器")
+    @filter.command("mclist", desc="列出所有MC服务器", alias={"服列表"})
     async def cmd_mclist(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
         data = self._get_group_serv_data(gid)
@@ -753,7 +892,7 @@ class MrconPlugin(Star):
             lines.append(f"  • {sname} → {display_addr}")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("mcadd", desc="添加MC服务器")
+    @filter.command("mcadd", desc="添加MC服务器", alias={"加服"})
     async def cmd_mcadd(self, event: AstrMessageEvent, name: str = "", addr: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可添加服务器")
@@ -781,7 +920,7 @@ class MrconPlugin(Star):
         display_addr = f"{host}:{port}" if port else host
         yield event.plain_result(f"✅ 已添加服务器: {name} ({display_addr})")
 
-    @filter.command("mcdel", desc="删除MC服务器")
+    @filter.command("mcdel", desc="删除MC服务器", alias={"删服"})
     async def cmd_mcdel(self, event: AstrMessageEvent, name: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可删除服务器")
@@ -798,13 +937,13 @@ class MrconPlugin(Star):
         self._save_group_serv_data(gid, data)
         yield event.plain_result(f"✅ 已删除服务器: {name}")
 
-    @filter.command("mcup", desc="更新MC服务器")
+    @filter.command("改服", desc="更新MC服务器", alias={"mcup"})
     async def cmd_mcup(self, event: AstrMessageEvent, name: str = "", new_name: str = "", new_addr: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可更新服务器")
             return
         if not name:
-            yield event.plain_result("用法: /mcup <名称> [新名称] [新地址]")
+            yield event.plain_result("用法: /改服 <名称> [新名称] [新地址]")
             return
         gid = self._get_group_id(event)
         data = self._get_group_serv_data(gid)
@@ -825,13 +964,13 @@ class MrconPlugin(Star):
         self._save_group_serv_data(gid, data)
         yield event.plain_result(f"✅ 已更新服务器: {name}")
 
-    @filter.command("mcshare", desc="共享服务器到其他群")
+    @filter.command("共享服", desc="共享服务器到其他群", alias={"mcshare"})
     async def cmd_mcshare(self, event: AstrMessageEvent, name: str = "", target_gid: str = ""):
         if not self.is_admin(str(event.get_sender_id())):
             yield event.plain_result("仅超级管理员可共享服务器")
             return
         if not name or not target_gid:
-            yield event.plain_result("用法: /mcshare <名称> <目标群ID>")
+            yield event.plain_result("用法: /共享服 <名称> <目标群ID>")
             return
         gid = self._get_group_id(event)
         src = self._get_group_serv_data(gid)
@@ -844,13 +983,13 @@ class MrconPlugin(Star):
         self._save_group_serv_data(target_gid, dst)
         yield event.plain_result(f"✅ 已将服务器 {name} 共享到群 {target_gid}")
 
-    @filter.command("mcunshare", desc="取消共享")
+    @filter.command("取消共享", desc="取消共享", alias={"mcunshare"})
     async def cmd_mcunshare(self, event: AstrMessageEvent, name: str = "", target_gid: str = ""):
         if not self.is_admin(str(event.get_sender_id())):
             yield event.plain_result("仅超级管理员可取消共享")
             return
         if not name or not target_gid:
-            yield event.plain_result("用法: /mcunshare <名称> <目标群ID>")
+            yield event.plain_result("用法: /取消共享 <名称> <目标群ID>")
             return
         dst = self._get_group_serv_data(target_gid)
         if name not in dst.get("servers", {}):
@@ -860,7 +999,7 @@ class MrconPlugin(Star):
         self._save_group_serv_data(target_gid, dst)
         yield event.plain_result(f"✅ 已取消共享服务器 {name}（群 {target_gid}）")
 
-    @filter.command("mccleanup", desc="清理失效服务器")
+    @filter.command("清理服", desc="清理失效服务器", alias={"mccleanup"})
     async def cmd_mccleanup(self, event: AstrMessageEvent):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可清理")
@@ -882,15 +1021,10 @@ class MrconPlugin(Star):
         else:
             yield event.plain_result("没有需要清理的服务器")
 
-    @filter.command("mcset", desc="设置查询显示项")
-    async def cmd_mcset(self, event: AstrMessageEvent, *args):
+    @filter.command("查询设置", desc="设置查询显示项", alias={"mcset"})
+    async def cmd_mcset(self, event: AstrMessageEvent, key: str = "", value: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可设置")
-            return
-            return
-        args = list(args)
-        if not args:
-            yield event.plain_result("用法: /mcset <项名> <0|1>  项名: 地址/版本/延迟/在线数量/玩家详细")
             return
         mapping = {
             "地址": "show_address_port", "addr": "show_address_port", "端口": "show_address_port",
@@ -899,15 +1033,10 @@ class MrconPlugin(Star):
             "在线数量": "show_online_count", "online": "show_online_count",
             "玩家详细": "show_players_detail", "players": "show_players_detail",
         }
-        key = mapping.get(str(args[0]).strip())
-        val = None
-        if key is None and len(args) >= 2:
-            key = mapping.get(str(args[1]).strip())
-            val = str(args[0]).strip()
-        elif key is not None and len(args) >= 2:
-            val = str(args[1]).strip()
-        if key is None:
-            yield event.plain_result(f"未知配置项: {args[0]}。可选: 地址/版本/延迟/在线数量/玩家详细")
+        cfg_key = mapping.get(key.strip())
+        val = value.strip()
+        if cfg_key is None:
+            yield event.plain_result(f"未知配置项: {key}。可选: 地址/版本/延迟/在线数量/玩家详细")
             return
         if val not in ("0", "1"):
             yield event.plain_result("值必须为 0(隐藏) 或 1(显示)")
@@ -919,44 +1048,253 @@ class MrconPlugin(Star):
             "show_online_count": "query_show_count",
             "show_players_detail": "query_show_players",
         }
-        setattr(self, attr_map[key], val == "1")
-        yield event.plain_result(f"✅ 已设置 {key} = {'显示' if val == '1' else '隐藏'}")
+        setattr(self, attr_map[cfg_key], val == "1")
+        yield event.plain_result(f"✅ 已设置 {cfg_key} = {'显示' if val == '1' else '隐藏'}")
 
-    @filter.command("onlinetime", desc="查看玩家在线时长")
-    async def cmd_onlinetime(self, event: AstrMessageEvent, player: str = ""):
+    @filter.command("在线时长", desc="查看玩家在线时长排行", alias={"onlinetime"})
+    async def cmd_onlinetime(self, event: AstrMessageEvent, target: str = ""):
+        """在线时长排行：默认本群排行，支持按服名/玩家名筛选"""
         if not self.tracker_enabled:
             yield event.plain_result("在线时长监控未开启")
             return
-        if not player:
-            ranking = self.db.get_online_time_ranking(15)
-            if not ranking:
-                yield event.plain_result("暂无在线时长数据")
-                return
-            lines = ["📊 在线时长排行:"]
-            for r in ranking:
-                secs = r["total"]
-                mins = secs // 60
-                hours = mins // 60
-                name = r["player_name"]
-                srv = r["server_name"]
-                if hours > 0:
-                    lines.append(f"  [{srv}] {name}: {hours}时{mins%60}分")
-                else:
-                    lines.append(f"  [{srv}] {name}: {mins}分")
-            yield event.plain_result("\n".join(lines))
+        gid = self._get_group_id(event)
+        data = self._get_group_serv_data(gid) if gid else {}
+        servers_dict = data.get("servers", {})
+        srv_names = list(servers_dict.keys()) if servers_dict else []
+        target = target.strip()
+        if not target:
+            # 默认：本群排行
+            if srv_names:
+                ranking = self.db.get_online_time_ranking(15, srv_names)
+                scope = f"本群 ({len(srv_names)} 服)"
+            else:
+                ranking = self.db.get_online_time_ranking(15, srv_names)
+                scope = "本群"
+        elif target in srv_names:
+            # 指定服务器名
+            ranking = self.db.get_online_time_ranking(15, [target])
+            scope = target
         else:
-            secs = self.db.get_player_total_seconds(player)
+            # 查指定玩家
+            secs = self.db.get_player_total_seconds(target)
             if secs <= 0:
-                yield event.plain_result(f"未找到玩家 {player} 的数据")
+                yield event.plain_result(f"未找到玩家 {target} 的数据")
                 return
             mins = secs // 60
             hours = mins // 60
-            yield event.plain_result(f"🎮 {player}: {hours}时{mins%60}分")
+            if hours > 0:
+                yield event.plain_result(f"🎮 {target}: {hours}时{mins%60}分")
+            else:
+                yield event.plain_result(f"🎮 {target}: {mins}分")
+            return
+        if not ranking:
+            yield event.plain_result(f"暂无在线时长数据（{scope}）")
+            return
+        lines = [f"📊 在线时长排行（{scope}）:"]
+        for r in ranking:
+            secs = r["total"]
+            mins = secs // 60
+            hours = mins // 60
+            name = r["player_name"]
+            srv = r["server_name"]
+            if hours > 0:
+                lines.append(f"  [{srv}] {name}: {hours}时{mins%60}分")
+            else:
+                lines.append(f"  [{srv}] {name}: {mins}分")
+        yield event.plain_result("\n".join(lines))
+
+    # ==============================================================
+    # 在线提醒群内配置（覆盖全局默认）
+    # ==============================================================
+    @filter.command("在线提醒", desc="当前群的在线提醒与踢出设置（管理员）")
+    async def cmd_tracker_set(self, event: AstrMessageEvent, sub: str = "", val1: str = "", val2: str = ""):
+        if not self.is_allowed(event):
+            yield event.plain_result("仅管理员可配置")
+            return
+        gid = str(self._get_group_id(event))
+        if not gid:
+            yield event.plain_result("请在群内使用此命令")
+            return
+        ovr = self._tracker_overrides.setdefault(gid, {})
+        sub = sub.strip()
+        val1 = val1.strip()
+        val2 = val2.strip()
+        gcfg = self._get_tracker_config(gid)
+
+        if not sub:
+            # 状态
+            ni = gcfg["notify_intervals"]
+            gf = gcfg.get("notify_game_format", "")
+            yield event.plain_result(
+                f"📋 本群在线提醒配置\n"
+                f"  提醒开关: {'✅ 开' if gcfg['notify'] else '❌ 关'}\n"
+                f"  提醒目标: {gcfg['notify_target']}\n"
+                f"  提醒节点: {ni} (分钟)\n"
+                f"  游戏提醒: {'✅ 开' if gcfg.get('notify_game') else '❌ 关'}\n"
+                f"  游戏格式: {gf}\n"
+                f"  踢出开关: {'✅ 开' if gcfg['kick_enabled'] else '❌ 关'}\n"
+                f"  踢出阈值: {gcfg['kick_threshold']} 分钟\n"
+                f"  踢出封禁: {gcfg.get('ban_minutes', 0)} 分钟\n"
+                f"  踢出原因: {gcfg['kick_reason']}\n"
+                f"  {'🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
+                f"\n游戏格式占位: {{player}}=玩家名 {{duration}}=时长\n"
+                f"MC颜色码: §a绿 §b青 §c红 §e黄 §l粗体 §n下划线\n"
+                f"\n快速: /在线提醒 开,游戏提醒=开,踢出=开,阈值=720,封禁=30\n"
+                f"分步: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|重置"
+            )
+            return
+
+        # === 逗号分隔批量配置 ===
+        if "," in sub or "=" in sub:
+            raw = str(getattr(event, "message_str", "") or "").strip()
+            idx = raw.find(sub)
+            bulk = raw[idx:] if idx >= 0 else sub
+            parts = bulk.split(",") if "," in bulk else [bulk]
+            updated = []
+            for p in parts:
+                p = p.strip()
+                if not p:
+                    continue
+                if "=" in p:
+                    k, v = p.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    if k == "开" or k == "关":
+                        ovr["notify_enabled"] = (k == "开")
+                    elif k == "目标":
+                        if v in ("group", "admin_dm"): ovr["notify_target"] = v
+                    elif k == "节点":
+                        try:
+                            ovr["notify_intervals"] = sorted([int(x.strip()) for x in v.split(",") if x.strip()], reverse=True)
+                        except ValueError:
+                            pass
+                    elif k == "游戏提醒":
+                        ovr["notify_in_game"] = v.lower() in ("开", "1", "true", "yes")
+                    elif k == "游戏格式":
+                        ovr["notify_game_format"] = v
+                    elif k == "踢出":
+                        ovr["kick_enabled"] = v.lower() in ("开", "1", "true", "yes")
+                    elif k == "阈值":
+                        try: ovr["kick_threshold"] = int(v)
+                        except ValueError: pass
+                    elif k == "封禁":
+                        try: ovr["ban_minutes"] = int(v)
+                        except ValueError: pass
+                    elif k == "原因":
+                        ovr["kick_reason"] = v
+                    updated.append(f"{k}={v}")
+                else:
+                    if p == "开":
+                        ovr["notify_enabled"] = True
+                        updated.append("开")
+                    elif p == "关":
+                        ovr["notify_enabled"] = False
+                        updated.append("关")
+                    elif p == "重置":
+                        self._tracker_overrides.pop(gid, None)
+                        yield event.plain_result("🔵 已重置为全局默认配置")
+                        return
+            yield event.plain_result(f"✅ 已更新: {', '.join(updated) if updated else '(无变更)'}")
+            return
+
+        # === 分步子命令 ===
+        if sub == "重置":
+            self._tracker_overrides.pop(gid, None)
+            yield event.plain_result("🔵 已重置为全局默认配置")
+            return
+
+        if sub in ("开", "关"):
+            ovr["notify_enabled"] = (sub == "开")
+            yield event.plain_result(f"✅ 本群在线提醒已{'开启' if sub == '开' else '关闭'}")
+            return
+
+        if sub == "节点":
+            if not val1:
+                yield event.plain_result("用法: /在线提醒 节点 <60,120,360>")
+                return
+            try:
+                intervals = sorted([int(x.strip()) for x in val1.split(",") if x.strip()], reverse=True)
+                if not intervals:
+                    raise ValueError
+                ovr["notify_intervals"] = intervals
+                yield event.plain_result(f"✅ 提醒节点已设为: {intervals} 分钟")
+            except ValueError:
+                yield event.plain_result("节点格式错误，例: /在线提醒 节点 60,120,360")
+            return
+
+        if sub == "目标":
+            if val1 not in ("group", "admin_dm"):
+                yield event.plain_result("目标应为 group 或 admin_dm")
+                return
+            ovr["notify_target"] = val1
+            yield event.plain_result(f"✅ 提醒目标已设为: {val1}")
+            return
+
+        if sub == "游戏提醒":
+            if val1.lower() in ("开", "1", "true", "yes"):
+                ovr["notify_in_game"] = True
+                yield event.plain_result("✅ 游戏内提醒已开启")
+            elif val1.lower() in ("关", "0", "false", "no"):
+                ovr["notify_in_game"] = False
+                yield event.plain_result("✅ 游戏内提醒已关闭")
+            else:
+                yield event.plain_result("用法: /在线提醒 游戏提醒 开|关")
+            return
+
+        if sub == "游戏格式":
+            raw = str(getattr(event, "message_str", "") or "").strip()
+            idx = raw.find("游戏格式")
+            if idx >= 0:
+                fmt = raw[idx + 4:].strip()
+                if fmt:
+                    ovr["notify_game_format"] = fmt
+                    yield event.plain_result("✅ 游戏内提醒格式已更新")
+                    return
+            yield event.plain_result("用法: /在线提醒 游戏格式 <文案>  ({player}=玩家 {duration}=时长)")
+            return
+
+        if sub == "封禁":
+            try:
+                ovr["ban_minutes"] = int(val1)
+                yield event.plain_result(f"✅ 踢出后封禁时长已设为 {val1} 分钟（0=不封禁）")
+            except ValueError:
+                yield event.plain_result("封禁时长应为数字（分钟），0=不封禁")
+            return
+
+        if sub == "踢出":
+            if val1 == "开":
+                ovr["kick_enabled"] = True
+                if val2:
+                    try:
+                        ovr["kick_threshold"] = int(val2)
+                    except ValueError:
+                        yield event.plain_result("踢出阈值应为数字（分钟）")
+                        return
+                yield event.plain_result(f"✅ 踢出已开启（阈值 {ovr.get('kick_threshold', gcfg['kick_threshold'])} 分钟）")
+            elif val1 == "关":
+                ovr["kick_enabled"] = False
+                yield event.plain_result("✅ 踢出已关闭")
+            elif val1 == "原因":
+                raw = str(getattr(event, "message_str", "") or "").strip()
+                for needle in ("踢出 原因 ", "踢出 原因"):
+                    idx = raw.find(needle)
+                    if idx >= 0:
+                        reason = raw[idx + len(needle):].strip()
+                        if reason:
+                            ovr["kick_reason"] = reason
+                            yield event.plain_result("✅ 踢出原因已更新")
+                            return
+                yield event.plain_result("用法: /在线提醒 踢出 原因 <文本>")
+                return
+            else:
+                yield event.plain_result("用法: /在线提醒 踢出 开 [阈值] | 踢出 关 | 踢出 原因 <文本>")
+            return
+
+        yield event.plain_result("未知子命令。可用: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|重置")
 
     # ==============================================================
     # 玩家数据库命令
     # ==============================================================
-    @filter.command("bind", desc="绑定MC账号")
+    @filter.command("绑定", desc="绑定MC账号（新玩家注册）", alias={"bind"})
     async def cmd_bind(self, event: AstrMessageEvent, mc_id: str = ""):
         if not self.pdb_enabled:
             yield event.plain_result("玩家数据库功能未开启")
@@ -965,20 +1303,29 @@ class MrconPlugin(Star):
             yield event.plain_result("用法: /bind <你的MC ID>")
             return
         qq_id = str(event.get_sender_id())
-        p = self._ensure_player(qq_id, mc_id)
-        if p["mc_id"] and p["mc_id"] != mc_id:
+        p = self._ensure_player(qq_id)
+        if p.get("mc_id"):
             yield event.plain_result(f"你已绑定 {p['mc_id']}，不能重复绑定")
             return
-        self._update_player(qq_id, {"mc_id": mc_id, "last_login": int(time.time())})
+        now = int(time.time())
+        self._update_player(qq_id, {
+            "mc_id": mc_id,
+            "first_login": now,
+            "last_login": now,
+            "points": self.pdb_new_pts,
+        })
         yield event.plain_result(f"✅ 已绑定 MC 账号: {mc_id}\n🎁 获得新玩家奖励 {self.pdb_new_pts} 积分！")
 
-    @filter.command("checkin", desc="每日签到")
+    @filter.command("签到", desc="每日签到（需先绑定MC账号）", alias={"checkin"})
     async def cmd_checkin(self, event: AstrMessageEvent):
         if not self.pdb_enabled:
             yield event.plain_result("玩家数据库功能未开启")
             return
         qq_id = str(event.get_sender_id())
         p = self._ensure_player(qq_id)
+        if not p.get("mc_id"):
+            yield event.plain_result("请先用 /绑定 绑定 MC 账号再签到")
+            return
         today = time.strftime("%Y-%m-%d")
         last = p.get("last_checkin_date", "")
         if last == today:
@@ -1003,7 +1350,7 @@ class MrconPlugin(Star):
         })
         yield event.plain_result(f"✅ 签到成功！连续签到 {streak} 天\n💰 +{pts} 积分 | 总积分: {p.get('points', 0) + pts}")
 
-    @filter.command("mystats", desc="查看个人统计")
+    @filter.command("我的", desc="查看个人统计", alias={"mystats"})
     async def cmd_mystats(self, event: AstrMessageEvent):
         if not self.pdb_enabled:
             yield event.plain_result("玩家数据库功能未开启")
@@ -1029,22 +1376,31 @@ class MrconPlugin(Star):
                 return banned_lower
         return ""
 
-    @filter.command("compensate", desc="申请物品补偿（输入完整RCON命令）", alias={"comp"})
-    async def cmd_compensate(self, event: AstrMessageEvent, *args):
-        if not self.pdb_enabled or not self.pdb_comp_enabled:
-            yield event.plain_result("物品补偿功能未开启")
-            return
-        if not self.is_allowed(event):
-            yield event.plain_result("⚠️ 仅白名单用户可使用物品补偿申请")
+    @filter.command("理赔", desc="申请物品补偿（输入完整RCON命令）", alias={"赔", "comp", "compensate"})
+    async def cmd_compensate(self, event: AstrMessageEvent, text: str = "", rest=None):
+        if not self.pdb_enabled:
+            yield event.plain_result("玩家数据库未开启")
             return
         qq_id = str(event.get_sender_id())
+        if not self.pdb_comp_enabled:
+            if qq_id not in self.admin_qqs and qq_id not in self.pdb_comp_whitelist:
+                yield event.plain_result("⚠️ 补偿功能仅白名单可用，你不在白名单中")
+                return
         p = self._ensure_player(qq_id)
         if not p.get("mc_id"):
-            yield event.plain_result("请先用 /bind 绑定 MC 账号")
+            yield event.plain_result("请先用 /绑定 绑定 MC 账号")
             return
-        rcon_cmd = " ".join(str(a) for a in args).strip()
+        # 仅转发 /理赔 后面的命令，不带前缀
+        parts = []
+        if isinstance(text, str) and text:
+            parts.append(text)
+        if isinstance(rest, list):
+            parts += [str(r) for r in rest if str(r)]
+        elif isinstance(rest, str) and rest:
+            parts.append(rest)
+        rcon_cmd = " ".join(parts)
         if not rcon_cmd:
-            yield event.plain_result("用法: /comp <完整RCON命令>\n例: /comp give PlayerName diamond 64")
+            yield event.plain_result("用法: /理赔 <完整RCON命令>\n例: /理赔 give PlayerName diamond 64")
             return
         banned = self._check_comp_blacklist(rcon_cmd)
         if banned:
@@ -1059,7 +1415,7 @@ class MrconPlugin(Star):
             self.db.update_compensation(comp_id, "approved")
             yield event.plain_result(f"✅ 补偿申请已自动通过 (#{comp_id})\n命令: {rcon_cmd}")
 
-    @filter.command("comp_list", desc="查看补偿申请列表")
+    @filter.command("理赔列表", desc="查看补偿申请列表", alias={"赔单", "comp_list"})
     async def cmd_comp_list(self, event: AstrMessageEvent):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可查看")
@@ -1071,10 +1427,10 @@ class MrconPlugin(Star):
         lines = ["📋 待处理补偿申请:"]
         for c in pending[:10]:
             lines.append(f"  #{c['id']} {c['mc_id']}({c['qq_id']}): {c.get('rcon_cmd', c.get('description', ''))[:60]}")
-        lines.append("使用 /comp_approve <ID> 批准 或 /comp_reject <ID> 拒绝")
+        lines.append("使用 /同意理赔 <ID> 批准 或 /拒绝理赔 <ID> 拒绝")
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("comp_approve", desc="批准补偿并执行RCON")
+    @filter.command("同意理赔", desc="批准补偿并执行RCON", alias={"comp_approve"})
     async def cmd_comp_approve(self, event: AstrMessageEvent, comp_id: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可审批")
@@ -1082,7 +1438,7 @@ class MrconPlugin(Star):
         try:
             cid = int(comp_id)
         except ValueError:
-            yield event.plain_result("用法: /comp_approve <申请ID>")
+            yield event.plain_result("用法: /同意理赔 <申请ID>")
             return
         comp = self.db.get_compensation(cid)
         if not comp:
@@ -1108,7 +1464,7 @@ class MrconPlugin(Star):
         async for msg in self._execute_on_conf(event, conf, rcon_cmd, f"补偿#{cid}"):
             yield msg
 
-    @filter.command("comp_reject", desc="拒绝补偿申请")
+    @filter.command("拒绝理赔", desc="拒绝补偿申请", alias={"comp_reject"})
     async def cmd_comp_reject(self, event: AstrMessageEvent, comp_id: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可审批")
@@ -1116,7 +1472,7 @@ class MrconPlugin(Star):
         try:
             cid = int(comp_id)
         except ValueError:
-            yield event.plain_result("用法: /comp_reject <申请ID>")
+            yield event.plain_result("用法: /拒绝理赔 <申请ID>")
             return
         comp = self.db.get_compensation(cid)
         if not comp:
@@ -1128,15 +1484,62 @@ class MrconPlugin(Star):
     # ==============================================================
     # 群服消息互联
     # ==============================================================
+    @filter.command("msay", desc="主动发送消息到MC（群服互联前缀命令）", alias={"群说", "服说", "mcsay"})
+    async def cmd_msay(self, event: AstrMessageEvent, text: str = "", rest=None):
+        """群内通过 /msay <消息> 主动发送消息到对应 MC 服务器"""
+        gid = self._get_group_id(event)
+        cfg = self._get_relay_config(gid)
+        if not cfg["enabled"] or not cfg["group_to_mc"]:
+            yield event.plain_result("当前群消息互通未开启")
+            return
+        parts = []
+        if isinstance(text, str) and text:
+            parts.append(text)
+        if isinstance(rest, list):
+            parts += [str(r) for r in rest if str(r)]
+        elif isinstance(rest, str) and rest:
+            parts.append(rest)
+        msg = " ".join(parts)
+        if not msg:
+            yield event.plain_result("用法: /msay <消息内容>")
+            return
+        user_name = str(event.get_sender_name() or "")
+        await self._relay_to_mc(event, user_name, msg)
+        # 也回复群内确认
+        yield event.plain_result(f"已发送 → {cfg['_resolved_server']}")
+
+    def _get_relay_config(self, gid: str) -> dict:
+        """获取某群的消息互联配置，优先群内覆盖，否则回退全局"""
+        override = self._relay_overrides.get(str(gid), {})
+        conf = self._get_relay_conf(gid) or {}
+        return {
+            "enabled": override.get("enabled", self.relay_enabled),
+            "group_to_mc": override.get("group_to_mc", self.relay_group_to_mc),
+            "format_group": override.get("format_group", self.relay_fmt_group),
+            "server_name": override.get("server_name", None),
+            "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
+        }
+
+    def _get_relay_conf(self, gid: str):
+        """获取群的 relay 目标服务器配置"""
+        override = self._relay_overrides.get(str(gid), {})
+        srv_name = override.get("server_name")
+        if srv_name:
+            srvs = self.group_servers.get(str(gid), [])
+            for s in srvs:
+                if s.get("server_name") == srv_name:
+                    return s
+        return self.group_map.get(gid)
     async def _relay_to_mc(self, event: AstrMessageEvent, user_name: str, message: str):
         gid = self._get_group_id(event)
-        conf = self.group_map.get(gid)
-        if not conf or not conf.get("relay_enabled"):
+        cfg = self._get_relay_config(gid)
+        if not cfg["enabled"] or not cfg["group_to_mc"]:
             return
-        if not self.relay_enabled or not self.relay_group_to_mc:
+        conf = self._get_relay_conf(gid)
+        if not conf:
             return
         try:
-            fmt = self.relay_fmt_group.replace("{name}", user_name).replace("{msg}", message)
+            fmt = cfg["format_group"].replace("{name}", user_name).replace("{msg}", message)
             escaped = json.dumps(fmt)
             cmd = f"tellraw @a {escaped}"
             host = conf.get("rcon_host")
@@ -1146,31 +1549,104 @@ class MrconPlugin(Star):
         except Exception as e:
             logger.debug(f"[mrcon] relay to MC failed: {e}")
 
-    @filter.command("relay", desc="群服消息互联开关")
-    async def cmd_relay(self, event: AstrMessageEvent, action: str = ""):
+    @filter.command("消息互通", desc="群服消息互联配置（管理员）", alias={"relay"})
+    async def cmd_relay(self, event: AstrMessageEvent, sub: str = "", val: str = ""):
         if not self.is_allowed(event):
             yield event.plain_result("仅管理员可操作")
             return
-        gid = self._get_group_id(event)
-        conf = self.group_map.get(gid)
-        if not conf:
-            yield event.plain_result("当前群未配置服务器")
+        gid = str(self._get_group_id(event))
+        ovr = self._relay_overrides.setdefault(gid, {})
+        cfg = self._get_relay_config(gid)
+        sub = sub.strip().lower()
+        val = val.strip()
+
+        if not sub:
+            # 状态展示
+            global_srv = self.group_map.get(gid, {})
+            relay_srv = self._get_relay_conf(gid) or {}
+            srv_display = relay_srv.get("server_name") or relay_srv.get("name") or global_srv.get("name") or "未配置"
+            yield event.plain_result(
+                f"📋 本群消息互通配置\n"
+                f"  互联开关: {'✅ 开' if cfg['enabled'] else '❌ 关'}\n"
+                f"  群→服转发: {'✅ 开' if cfg['group_to_mc'] else '❌ 关'}\n"
+                f"  格式: {cfg['format_group']}\n"
+                f"  目标服务器: {srv_display}\n"
+                f"  {'🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
+                f"\n格式占位: {{name}}=群昵称 {{msg}}=消息内容\n"
+                f"\n子命令: 开|关|格式|服|重置\n"
+                f"例: /消息互通 开\n"
+                f"    /消息互通 格式 [QQ] {name}: {msg}\n"
+                f"    /消息互通 服 生存一区\n"
+                f"    /消息互通 重置"
+            )
             return
-        if action.lower() in ("on", "1", "开启", "启用"):
-            conf["relay_enabled"] = True
-            yield event.plain_result("✅ 群服消息互联已开启")
-        elif action.lower() in ("off", "0", "关闭", "禁用"):
-            conf["relay_enabled"] = False
-            yield event.plain_result("✅ 群服消息互联已关闭")
-        else:
-            status = "开启" if conf.get("relay_enabled", False) else "关闭"
-            yield event.plain_result(f"当前群服消息互联: {status}\n可用: /relay on | /relay off")
+
+        if sub == "重置":
+            self._relay_overrides.pop(gid, None)
+            yield event.plain_result("🔵 已重置为全局默认配置")
+            return
+
+        if sub in ("on", "1", "开", "开启", "启用"):
+            ovr["enabled"] = True
+            yield event.plain_result("✅ 本群消息互通已开启")
+            return
+
+        if sub in ("off", "0", "关", "关闭", "禁用"):
+            ovr["enabled"] = False
+            yield event.plain_result("✅ 本群消息互通已关闭")
+            return
+
+        if sub == "格式" or sub == "format":
+            if not val:
+                yield event.plain_result("用法: /消息互通 格式 <文本>  ({name}=群昵称 {msg}=消息)")
+                return
+            ovr["format_group"] = val
+            yield event.plain_result(f"✅ 转发格式已设为: {val}")
+            return
+
+        if sub in ("服", "服务器", "server"):
+            if not val:
+                # 列出可选服务器
+                srvs = self.group_servers.get(gid, [])
+                if not srvs:
+                    yield event.plain_result("当前群未绑定任何服务器")
+                    return
+                lines = ["可选服务器:"]
+                for s in srvs:
+                    sn = s.get("server_name", "")
+                    marker = " ← 当前" if ovr.get("server_name") == sn else ""
+                    lines.append(f"  • {sn}{marker}")
+                yield event.plain_result("\n".join(lines))
+                return
+            # 校验服务器名是否存在
+            srvs = self.group_servers.get(gid, [])
+            matched = None
+            for s in srvs:
+                if s.get("server_name", "") == val:
+                    matched = val
+                    break
+            if matched is None:
+                yield event.plain_result(f"未找到服务器「{val}」，请用 /mclist 查看已绑定服务器")
+                return
+            ovr["server_name"] = val
+            yield event.plain_result(f"✅ 消息互通目标服务器已设为: {val}")
+            return
+
+        yield event.plain_result(
+            f"未知子命令: {sub}\n"
+            f"可用: 开|关|格式|服|重置\n"
+            f"直接 /消息互通 查看状态"
+        )
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def _on_group_message(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
-        conf = self.group_map.get(gid)
-        if not conf or not conf.get("relay_enabled") or not self.relay_enabled or not self.relay_group_to_mc:
+        # 存储 UMO 并刷新生效中的通知消息
+        self._last_umo[str(gid)] = event
+        async for msg in self._flush_pending_msgs(event):
+            yield msg
+        cfg = self._get_relay_config(gid)
+        if not cfg["enabled"] or not cfg["group_to_mc"]:
             return
         text = str(getattr(event, "message_str", "") or "")
         if not text or text.startswith("/"):
@@ -1178,34 +1654,38 @@ class MrconPlugin(Star):
         user_name = str(event.get_sender_name() or "")
         await self._relay_to_mc(event, user_name, text)
 
-    # ==============================================================
-    # 在线列表
-    # ==============================================================
-    @filter.command("online", desc="查看MC服务器在线玩家")
-    async def cmd_online(self, event: AstrMessageEvent):
+    async def _flush_pending_msgs(self, event: AstrMessageEvent):
+        """释放攒积的在线提醒消息"""
         gid = self._get_group_id(event)
-        confs = self.group_servers.get(gid) if gid else None
-        conf = (confs[0] if confs and len(confs) == 1 else (self.group_map.get(gid) if gid else None))
-        if not conf:
-            yield event.plain_result("当前群未配置服务器")
-            return
-        online_list = await self._get_online_player_list(conf)
-        if not online_list:
-            yield event.plain_result("当前无在线玩家")
-            return
-        srv_name = conf.get("server_name", "")
-        if self.query_render_image:
-            yield event.plain_result(f"🖥️ {srv_name} 在线玩家 ({len(online_list)}人)\n{chr(10).join(f'  • {p}' for p in online_list)}")
+        sender = str(event.get_sender_id())
+        if self.tracker_notify_target == "group":
+            # 群内模式：从群消息触发时直接发到该群
+            msgs = self._pending_msgs.pop(str(gid), None)
+            if msgs:
+                for msg in msgs:
+                    yield event.plain_result(msg)
         else:
-            lines = [f"🖥️ {srv_name} 在线玩家 ({len(online_list)}人)"]
-            for p in online_list:
-                lines.append(f"  • {p}")
-            yield event.plain_result("\n".join(lines))
+            # 管理员私聊模式：攒积消息，等管理员私聊bot时发送
+            pass
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def _flush_admin_dm(self, event: AstrMessageEvent):
+        """管理员私聊时，刷新生效的在线提醒"""
+        if self.tracker_notify_target != "admin_dm":
+            return
+        sender = str(event.get_sender_id())
+        if not self.is_allowed(event):
+            return
+        for gid in list(self._pending_msgs.keys()):
+            msgs = self._pending_msgs.pop(gid, None)
+            if msgs:
+                for msg in msgs:
+                    yield event.plain_result(f"[群{gid}] {msg}")
 
     # ==============================================================
     # RCON 命令（原有 + mcing 迁移）
     # ==============================================================
-    @filter.command("mrcon", desc="将后续文本原样转发到 RCON 控制台", alias={"mcmd"})
+    @filter.command("mrcon", desc="将后续文本原样转发到 RCON 控制台", alias={"执行", "mcmd"})
     async def mrcon(self, event: AstrMessageEvent, text: str = "", rest=None):
         sender_qq = str(event.get_sender_id())
         user_name = event.get_sender_name()
@@ -1256,7 +1736,7 @@ class MrconPlugin(Star):
             lines = ["当前群配置了多个 RCON 服务器，请选择编号："]
             for idx, c in enumerate(servers, start=1):
                 lines.append(f"{idx}. {c.get('display_name')}")
-            lines.append(f"请在 {self.select_ttl} 秒内回复编号（直接发送数字即可），或使用 /rcsel <编号>")
+            lines.append(f"请在 {self.select_ttl} 秒内回复编号（直接发送数字即可），或使用 /选服 <编号>")
             await event.send(event.plain_result("\n".join(lines)))
 
             @session_waiter(timeout=self.select_ttl, record_history_chains=False)
@@ -1351,7 +1831,7 @@ class MrconPlugin(Star):
         async for msg in self.execute_and_reply(event, full_cmd, "命令转发"):
             yield msg
 
-    @filter.command("rcsel", desc="选择 RCON 服务器编号", alias={"rc选", "rcserver"})
+    @filter.command("选服", desc="选择 RCON 服务器编号", alias={"rc选", "rcsel", "rcserver"})
     async def rcsel(self, event: AstrMessageEvent, index: str = ""):
         key = self._ps_key(event)
         rec = self.pending_select.get(key)
@@ -1365,7 +1845,7 @@ class MrconPlugin(Star):
         try:
             i = int(str(index).strip())
         except Exception:
-            yield event.plain_result("请输入有效编号，如 /rcsel 1")
+            yield event.plain_result("请输入有效编号，如 /选服 1")
             return
         options = rec.get("options", [])
         if i < 1 or i > len(options):
@@ -1451,7 +1931,7 @@ class MrconPlugin(Star):
         del self.exec_votes[gid]
         yield event.plain_result(f"管理员已裁决否决！命令 `{cmd}` 被否决")
 
-    @filter.command("rcmacro", desc="执行宏命令", alias={"rcm"})
+    @filter.command("宏", desc="执行宏命令", alias={"rcm", "rcmacro"})
     async def rcmacro(self, event: AstrMessageEvent, name: str = "", args: str = ""):
         sender_qq = str(event.get_sender_id())
         user_name = event.get_sender_name()
@@ -1480,7 +1960,7 @@ class MrconPlugin(Star):
                 async for msg in self.execute_and_reply(event, cc, f"宏:{name}"):
                     yield msg
 
-    @filter.command("rcscript", desc="执行脚本文件", alias={"rcs"})
+    @filter.command("脚本", desc="执行脚本文件", alias={"rcs", "rcscript"})
     async def rcscript(self, event: AstrMessageEvent, filename: str = ""):
         sender_qq = str(event.get_sender_id())
         user_name = event.get_sender_name()
@@ -1517,3 +1997,66 @@ class MrconPlugin(Star):
                     return
                 async for msg in self.execute_and_reply(event, ln, f"脚本:{filename}"):
                     yield msg
+
+    # ==============================================================
+    # 帮助
+    # ==============================================================
+    @filter.command("rchelp", desc="查看所有可用命令", alias={"rc帮助", "帮助", "help", "mchelp"})
+    async def cmd_help(self, event: AstrMessageEvent):
+        yield event.plain_result(
+            "━━━ MRCon 命令帮助 ━━━\n"
+            "\n"
+            "▎🖥️ MC 服务器查询\n"
+            "  /mc                 查询所有绑定服务器状态（含在线玩家）\n"
+            "  /mcget <名称>       查看单服详情 （别名：/服详情）\n"
+            "  /mclist             列出本群已配置的服务器\n"
+            "  /mcset <项名> <0|1>  设置查询显示项（管理员）\n"
+            "  /在线时长 [服|玩家]   在线时长排行，默认本群（别名：/onlinetime）\n"
+            "  /在线提醒            查看/配置本群在线提醒与踢出（管理员）\n"
+            "\n"
+            "▎⚙️ 服务器管理（管理员）\n"
+            "  /mcadd <名称> <地址>   添加服务器\n"
+            "  /mcdel <名称>          删除服务器\n"
+            "  /mcup <名称> [新名] [地址]  更新服务器 （别名：/改服）\n"
+            "  /mcshare <名称> <群号>  共享服务器到其他群\n"
+            "  /mcunshare <名称> <群号> 取消共享\n"
+            "  /mccleanup              清理失效服务器\n"
+            "\n"
+            "▎🎯 RCON 远程命令\n"
+            "  /mrcon <命令>        发送RCON命令到服务器（别名：/执行 /mcmd）\n"
+            "  /选服 <编号>          选择当前RCON目标服务器\n"
+            "  /宏 <名称> [参数]      执行预设宏命令\n"
+            "  /脚本 <文件名>         执行脚本文件\n"
+            "  /rc赞同 | /rc反对 | /rc通过 | /rc否决  投票裁决\n"
+            "\n"
+            "▎👤 玩家功能\n"
+            "  /绑定 <MC_ID>         绑定MC账号 / 新玩家注册\n"
+            "  /签到                 每日签到获取积分\n"
+            "  /我的                 查看个人积分与统计\n"
+            "  /理赔 <RCON命令>       申请物品补偿 （别名：/赔）\n"
+            "                        开=全局可用 | 关=仅白名单可用\n"
+            "  /理赔列表             查看待处理申请（管理员）\n"
+            "  /同意理赔 <ID>         批准并执行（管理员）\n"
+            "  /拒绝理赔 <ID>         拒绝申请（管理员）\n"
+            "\n"
+            "▎🔗 群服消息互联\n"
+            "  /msay <消息>          主动发送消息到MC公屏 （别名：/群说 /服说）\n"
+            "  /消息互通             查看本群消息互通状态与配置\n"
+            "  /消息互通 开|关        开关本群消息转发\n"
+            "  /消息互通 格式 <文本>   自定义转发格式（{name}/{msg}）\n"
+            "  /消息互通 服 <名称>     指定目标服务器（独立分配）\n"
+            "  /消息互通 重置          恢复全局默认配置\n"
+            "\n"
+            "▎🌐 Web 管理面板  v3.9.6\n"
+            "  浏览器访问 http://localhost:9949 图形化管理所有配置\n"
+            "  （基于原生 asyncio TCP，零外部依赖，15 个功能模块）\n"
+            "  • 📊 仪表盘总览（卡片点击跳转）   • 🖥️ 服务器增删改查 + 投票\n"
+            "  • 🔗 群服互联（自动绑定 + 多服绑定 + 独立开关）\n"
+            "  • 📡 在线追踪配置         • 👥 玩家数据管理 + 导入\n"
+            "  • 📋 补偿审批管理         • 🟢 在线列表 + 时段图表 + 排行\n"
+            "  • ⚡ 快捷命令（预设/FTB）  • 📜 审计日志（自动刷新）\n"
+            "  • ⚙️ 全局设置（双列卡片）  • 🔧 高级（白名单/公开/共享）\n"
+            "  配置项 web_panel.enabled = true 启动\n"
+            "\n"
+            "━━━ 输入 /rchelp 随时查看此帮助 ━━━"
+        )

@@ -67,6 +67,32 @@ class Database:
             finally:
                 conn.close()
 
+    def find_player_by_mc_id(self, mc_id: str) -> dict | None:
+        """通过 MC ID 查找玩家。返回 player dict 或 None。"""
+        if not mc_id: return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM players WHERE mc_id=?", (mc_id,))
+                row = cur.fetchone()
+                if row: return dict(row)
+                return None
+            finally: conn.close()
+
+    def insert_player_raw(self, qq_id: str, mc_id: str = None, points: int = 50, created_at: int = None):
+        """直接插入玩家记录（不检查是否存在）。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT OR IGNORE INTO players (qq_id, mc_id, points, checkin_streak, created_at) VALUES (?, ?, ?, 0, ?)",
+                    (qq_id, mc_id if mc_id else None, points, created_at or int(time.time())))
+                conn.commit()
+                return cur.rowcount > 0
+            finally: conn.close()
+
     def migrate_from_json(self, player_db_path: str, sessions_path: str):
         with self._lock:
             conn = self._connect()
@@ -132,7 +158,8 @@ class Database:
             finally:
                 conn.close()
 
-    def ensure_player(self, qq_id: str, mc_id: str = "") -> dict:
+    def ensure_player(self, qq_id: str) -> dict:
+        """确保玩家记录存在，仅创建空记录（不设置 MC ID、积分等）"""
         with self._lock:
             conn = self._connect()
             try:
@@ -141,8 +168,7 @@ class Database:
                     now = int(time.time())
                     conn.execute(
                         "INSERT INTO players (qq_id, mc_id, points, checkin_streak, last_checkin_date, first_login, last_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (str(qq_id), str(mc_id), 50 if mc_id else 0, 0, "",
-                         now if mc_id else None, now if mc_id else None, now),
+                        (str(qq_id), "", 0, 0, "", None, None, now),
                     )
                     conn.commit()
                     row = conn.execute("SELECT * FROM players WHERE qq_id = ?", (str(qq_id),)).fetchone()
@@ -154,7 +180,14 @@ class Database:
         with self._lock:
             conn = self._connect()
             try:
-                self.ensure_player(qq_id)
+                # 支持修改 QQ 号（更换绑定）
+                new_qq = str(updates.pop("qq_id", "")).strip() if "qq_id" in updates else ""
+                if new_qq and new_qq != qq_id:
+                    self.ensure_player(new_qq)
+                    conn.execute("UPDATE players SET qq_id = ? WHERE qq_id = ?", (new_qq, str(qq_id)))
+                    qq_id = new_qq
+                else:
+                    self.ensure_player(qq_id)
                 allowed = {"mc_id", "points", "checkin_streak", "last_checkin_date", "first_login", "last_login"}
                 sets = {k: v for k, v in updates.items() if k in allowed}
                 if not sets:
@@ -199,16 +232,29 @@ class Database:
             finally:
                 conn.close()
 
-    def get_online_time_ranking(self, limit: int = 15) -> list:
+    def get_online_time_ranking(self, limit: int = 15, server_names: list = None) -> list:
+        """获取在线时长排行，可选按服务器名列表过滤；server_names=[] 返回空"""
+        if server_names is not None and len(server_names) == 0:
+            return []
         with self._lock:
             conn = self._connect()
             try:
-                rows = conn.execute(
-                    """SELECT server_name, player_name, SUM(end_ts - start_ts) as total
-                       FROM online_sessions GROUP BY server_name, player_name
-                       ORDER BY total DESC LIMIT ?""",
-                    (limit,),
-                ).fetchall()
+                if server_names:
+                    placeholders = ",".join(["?"] * len(server_names))
+                    rows = conn.execute(
+                        f"""SELECT server_name, player_name, SUM(end_ts - start_ts) as total
+                           FROM online_sessions WHERE server_name IN ({placeholders})
+                           GROUP BY server_name, player_name
+                           ORDER BY total DESC LIMIT ?""",
+                        (*server_names, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT server_name, player_name, SUM(end_ts - start_ts) as total
+                           FROM online_sessions GROUP BY server_name, player_name
+                           ORDER BY total DESC LIMIT ?""",
+                        (limit,),
+                    ).fetchall()
                 return [dict(r) for r in rows]
             finally:
                 conn.close()
@@ -241,6 +287,70 @@ class Database:
             try:
                 rows = conn.execute("SELECT * FROM compensations WHERE status='pending' ORDER BY time ASC LIMIT 20").fetchall()
                 return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def get_all_compensations(self, status: str = "", limit: int = 100) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                if status and status != "all":
+                    rows = conn.execute(
+                        "SELECT * FROM compensations WHERE status=? ORDER BY time DESC LIMIT ?",
+                        (status, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM compensations ORDER BY time DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def count_compensations(self, status: str = "") -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                if status and status != "all":
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM compensations WHERE status=?",
+                        (status,),
+                    ).fetchone()
+                else:
+                    row = conn.execute("SELECT COUNT(*) as cnt FROM compensations").fetchone()
+                return int(row["cnt"]) if row else 0
+            finally:
+                conn.close()
+
+    def count_players(self) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute("SELECT COUNT(*) as cnt FROM players").fetchone()
+                return int(row["cnt"]) if row else 0
+            finally:
+                conn.close()
+
+    def get_all_players(self, limit: int = 200) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT qq_id, mc_id, points, checkin_streak, last_checkin_date, created_at FROM players ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def delete_player(self, qq_id: str) -> bool:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute("DELETE FROM players WHERE qq_id = ?", (str(qq_id),))
+                conn.commit()
+                return cur.rowcount > 0
             finally:
                 conn.close()
 

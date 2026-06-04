@@ -1,1 +1,2 @@
-mcstatus
+# mcstatus 为可选依赖，使用 mcstatus 查询方式时需手动安装
+# pip install mcstatus
