@@ -6,8 +6,9 @@ import time
 from pathlib import Path
 from collections import defaultdict
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.message_components import Plain
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
@@ -43,7 +44,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "3.9.6")
+@register("mrcon", "lindagao", "MC 综合管理插件", "3.11.1")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化
@@ -115,11 +116,12 @@ class MrconPlugin(Star):
         self.tracker_notify_game = bool(tracker_cfg.get("notify_in_game", False))
         self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！") or "")
         self.tracker_ban_minutes = int(tracker_cfg.get("auto_kick_ban_minutes", 30) or 30)
+        self.ranking_reset_hours = int(tracker_cfg.get("ranking_reset_interval_hours", 0) or 0)  # 0=不自动重置
+        self._last_ranking_reset = 0
         self._pending_msgs = {}     # gid → [(msg, group_name)]
         self._last_umo = {}         # gid → unified_msg_origin
         self._tracker_overrides = {}  # gid → {notify_enabled, notify_target, notify_intervals, kick_enabled, kick_threshold, kick_reason}
         self._pending_unbans = {}   # player_key → (unban_time, conf)
-        self._relay_overrides = {}   # gid → {enabled, format_group, server_name, ...}
 
         relay_cfg = self.config.get("relay", {})
         if not isinstance(relay_cfg, dict):
@@ -129,6 +131,8 @@ class MrconPlugin(Star):
         self.relay_mc_to_group = bool(relay_cfg.get("mc_to_group", False))
         self.relay_fmt_group = str(relay_cfg.get("format_group", "[QQ] {name}: {msg}"))
         self.relay_fmt_mc = str(relay_cfg.get("format_mc", "[MC] {player}: {msg}"))
+        self.relay_require_msay = bool(relay_cfg.get("require_msay", False))  # 是否仅允许 /msay 命令互通
+        self._relay_overrides = relay_cfg.get("group_settings", {})  # gid → [{server_name, ...}] 从配置持久化加载
 
         player_db_cfg = self.config.get("player_db", {})
         if not isinstance(player_db_cfg, dict):
@@ -396,16 +400,55 @@ class MrconPlugin(Star):
         except Exception:
             pass
 
-    def _audit(self, event: AstrMessageEvent, cmd: str, ok: bool, resp: str):
+    def _audit(self, event: AstrMessageEvent, cmd: str, ok: bool, resp: str, category: str = "cmd"):
         try:
             rec = {
                 "time": int(time.time()),
+                "category": category,
                 "sender_id": str(event.get_sender_id()),
                 "sender_name": str(event.get_sender_name()),
                 "group_id": self._get_group_id(event),
                 "cmd": cmd,
                 "ok": bool(ok),
                 "resp": strip_mc_color(str(resp))[:2000],
+            }
+            os.makedirs(self.plugin_data_dir, exist_ok=True)
+            with open(self.audit_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _audit_web(self, op: str, detail: str = "", ok: bool = True, operator: str = "web"):
+        """Web 操作审计日志"""
+        try:
+            rec = {
+                "time": int(time.time()),
+                "category": "web",
+                "sender_id": "0",
+                "sender_name": operator,
+                "group_id": "",
+                "cmd": op,
+                "ok": bool(ok),
+                "resp": str(detail)[:2000],
+            }
+            os.makedirs(self.plugin_data_dir, exist_ok=True)
+            with open(self.audit_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _audit_web_cmd(self, op: str, detail: str = "", ok: bool = True, operator: str = "web"):
+        """Web 命令转发审计"""
+        try:
+            rec = {
+                "time": int(time.time()),
+                "category": "web_rcon",
+                "sender_id": "0",
+                "sender_name": operator,
+                "group_id": "",
+                "cmd": op,
+                "ok": bool(ok),
+                "resp": str(detail)[:2000],
             }
             os.makedirs(self.plugin_data_dir, exist_ok=True)
             with open(self.audit_file, "a", encoding="utf-8") as f:
@@ -795,6 +838,19 @@ class MrconPlugin(Star):
                         if s["server"] == srv_name and s["player"] not in online:
                             self.db.add_online_session(srv_name, s["player"], s["login_at"], now)
                             del self._online_cache[sid]
+                # 定时重置在线时长排行
+                if self.ranking_reset_hours > 0:
+                    last = self._last_ranking_reset
+                    if last == 0:
+                        self._last_ranking_reset = now
+                    elif (now - last) >= self.ranking_reset_hours * 3600:
+                        try:
+                            self.db._connect().cursor().execute("DELETE FROM online_sessions")
+                            self.db._connect().commit()
+                            self._last_ranking_reset = now
+                            logger.info(f"[mrcon] 已自动重置在线时长排行（间隔 {self.ranking_reset_hours} 小时）")
+                        except Exception as e:
+                            logger.error(f"[mrcon] 自动重置排行失败: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1508,21 +1564,69 @@ class MrconPlugin(Star):
         # 也回复群内确认
         yield event.plain_result(f"已发送 → {cfg['_resolved_server']}")
 
+    def _get_relay_override(self, gid: str) -> dict:
+        """获取群 relay override（兼容 list [{...}] 与 dict {...}，返回可变引用）"""
+        gid = str(gid)
+        ov = self._relay_overrides.get(gid)
+        if isinstance(ov, list):
+            if ov:
+                return ov[0]
+            ov.append({})
+            return ov[0]
+        if isinstance(ov, dict):
+            return ov
+        self._relay_overrides[gid] = {}
+        return self._relay_overrides[gid]
+
+    def _save_relay_overrides(self):
+        """持久化群服互联覆盖配置到 config"""
+        self.config["relay"]["group_settings"] = self._relay_overrides
+        try:
+            self.config.save_config()
+        except Exception as e:
+            logger.error(f"[mrcon] 保存 relay_overrides 失败: {e}")
+
     def _get_relay_config(self, gid: str) -> dict:
-        """获取某群的消息互联配置，优先群内覆盖，否则回退全局"""
-        override = self._relay_overrides.get(str(gid), {})
+        """获取某群的消息互联配置，支持 mode: off/global/custom"""
+        override = self._get_relay_override(gid)
         conf = self._get_relay_conf(gid) or {}
-        return {
-            "enabled": override.get("enabled", self.relay_enabled),
-            "group_to_mc": override.get("group_to_mc", self.relay_group_to_mc),
-            "format_group": override.get("format_group", self.relay_fmt_group),
-            "server_name": override.get("server_name", None),
-            "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
-        }
+        mode = override.get("mode", "off")
+        if mode == "off":
+            return {
+                "enabled": False, "group_to_mc": False, "mc_to_group": False,
+                "mode": "off", "format_group": self.relay_fmt_group,
+                "format_mc": self.relay_fmt_mc,
+                "require_msay": False,
+                "server_name": None, "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
+            }
+        elif mode == "global":
+            return {
+                "enabled": self.relay_enabled,
+                "group_to_mc": self.relay_group_to_mc,
+                "mc_to_group": self.relay_mc_to_group,
+                "mode": "global",
+                "format_group": self.relay_fmt_group,
+                "format_mc": self.relay_fmt_mc,
+                "require_msay": self.relay_require_msay,
+                "server_name": override.get("server_name"),
+                "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
+            }
+        else:  # custom
+            return {
+                "enabled": override.get("enabled", True),  # 独立配置默认启用，不受全局 relay_enabled 影响
+                "group_to_mc": override.get("group_to_mc", self.relay_group_to_mc),
+                "mc_to_group": override.get("mc_to_group", False),
+                "mode": "custom",
+                "format_group": override.get("format_group", self.relay_fmt_group),
+                "format_mc": override.get("format_mc", self.relay_fmt_mc),
+                "require_msay": override.get("require_msay", self.relay_require_msay),
+                "server_name": override.get("server_name", None),
+                "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
+            }
 
     def _get_relay_conf(self, gid: str):
         """获取群的 relay 目标服务器配置"""
-        override = self._relay_overrides.get(str(gid), {})
+        override = self._get_relay_override(gid)
         srv_name = override.get("server_name")
         if srv_name:
             srvs = self.group_servers.get(str(gid), [])
@@ -1530,6 +1634,44 @@ class MrconPlugin(Star):
                 if s.get("server_name") == srv_name:
                     return s
         return self.group_map.get(gid)
+    async def _on_mc_chat(self, server_name: str, player: str, message: str) -> int:
+        """MC 服→QQ 群消息转发，根据 relay 配置分发到匹配的群"""
+        count = 0
+        for gid, entries in list(self._relay_overrides.items()):
+            gid = str(gid)
+            entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
+            for entry in entry_list:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("server_name") != server_name:
+                    continue
+                mode = entry.get("mode", "off")
+                if mode == "off":
+                    continue
+                if mode == "global":
+                    if not self.relay_mc_to_group:
+                        continue
+                    fmt = self.relay_fmt_mc
+                elif mode == "custom":
+                    if not entry.get("mc_to_group"):
+                        continue
+                    fmt = entry.get("format_mc", self.relay_fmt_mc)
+                else:
+                    continue
+                text = fmt.replace("{player}", player).replace("{msg}", message).replace("{server}", server_name)
+                try:
+                    umo = f"napcat:GroupMessage:{gid}"
+                    chain = MessageChain(chain=[Plain(text)])
+                    await self.context.send_message(umo, chain)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"[mrcon] MC→群转发失败 {gid}: {e}")
+        if count == 0:
+            logger.debug(f"[mrcon] MC 服 {server_name} 消息无匹配群")
+        else:
+            logger.info(f"[mrcon] MC 服 {server_name} 消息已分发到 {count} 个群")
+        return count
+
     async def _relay_to_mc(self, event: AstrMessageEvent, user_name: str, message: str):
         gid = self._get_group_id(event)
         cfg = self._get_relay_config(gid)
@@ -1555,7 +1697,7 @@ class MrconPlugin(Star):
             yield event.plain_result("仅管理员可操作")
             return
         gid = str(self._get_group_id(event))
-        ovr = self._relay_overrides.setdefault(gid, {})
+        ovr = self._get_relay_override(gid)
         cfg = self._get_relay_config(gid)
         sub = sub.strip().lower()
         val = val.strip()
@@ -1565,16 +1707,21 @@ class MrconPlugin(Star):
             global_srv = self.group_map.get(gid, {})
             relay_srv = self._get_relay_conf(gid) or {}
             srv_display = relay_srv.get("server_name") or relay_srv.get("name") or global_srv.get("name") or "未配置"
+            mode_label = {"off": "❌ 不互通", "global": "🔵 遵循全局", "custom": "🟢 独立配置"}.get(cfg["mode"], cfg["mode"])
             yield event.plain_result(
-                f"📋 本群消息互通配置\n"
-                f"  互联开关: {'✅ 开' if cfg['enabled'] else '❌ 关'}\n"
+                f"📋 本群消息互联配置\n"
+                f"  模式: {mode_label}\n"
                 f"  群→服转发: {'✅ 开' if cfg['group_to_mc'] else '❌ 关'}\n"
+                f"  服→群转发: {'✅ 开' if cfg['mc_to_group'] else '❌ 关'}\n"
+                f"  仅 /msay: {'✅ 开（只允许命令互通）' if cfg.get('require_msay') else '❌ 关（自动转发群消息）'}\n"
                 f"  格式: {cfg['format_group']}\n"
                 f"  目标服务器: {srv_display}\n"
-                f"  {'🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
+                f"  全局默认: 群→服={'✅' if self.relay_group_to_mc else '❌'} 服→群={'✅' if self.relay_mc_to_group else '❌'} 仅msay={'✅' if self.relay_require_msay else '❌'}\n"
                 f"\n格式占位: {{name}}=群昵称 {{msg}}=消息内容\n"
-                f"\n子命令: 开|关|格式|服|重置\n"
-                f"例: /消息互通 开\n"
+                f"\n子命令: 开|关|模式|群到服|服到群|仅msay|格式|服|重置\n"
+                f"例: /消息互通 模式 custom\n"
+                f"    /消息互通 群到服 开\n"
+                f"    /消息互通 仅msay 开（开启后只会通过 /msay 命令转发）\n"
                 f"    /消息互通 格式 [QQ] {name}: {msg}\n"
                 f"    /消息互通 服 生存一区\n"
                 f"    /消息互通 重置"
@@ -1583,17 +1730,22 @@ class MrconPlugin(Star):
 
         if sub == "重置":
             self._relay_overrides.pop(gid, None)
+            self._save_relay_overrides()
             yield event.plain_result("🔵 已重置为全局默认配置")
             return
 
         if sub in ("on", "1", "开", "开启", "启用"):
+            ovr["mode"] = "custom"
             ovr["enabled"] = True
-            yield event.plain_result("✅ 本群消息互通已开启")
+            ovr["group_to_mc"] = True
+            self._save_relay_overrides()
+            yield event.plain_result("✅ 本群消息互通已开启（群→服转发已启用，模式: 独立配置）")
             return
 
         if sub in ("off", "0", "关", "关闭", "禁用"):
-            ovr["enabled"] = False
-            yield event.plain_result("✅ 本群消息互通已关闭")
+            ovr["mode"] = "off"
+            self._save_relay_overrides()
+            yield event.plain_result("❌ 本群消息互通已关闭（模式: 不互通）")
             return
 
         if sub == "格式" or sub == "format":
@@ -1601,6 +1753,7 @@ class MrconPlugin(Star):
                 yield event.plain_result("用法: /消息互通 格式 <文本>  ({name}=群昵称 {msg}=消息)")
                 return
             ovr["format_group"] = val
+            self._save_relay_overrides()
             yield event.plain_result(f"✅ 转发格式已设为: {val}")
             return
 
@@ -1629,7 +1782,51 @@ class MrconPlugin(Star):
                 yield event.plain_result(f"未找到服务器「{val}」，请用 /mclist 查看已绑定服务器")
                 return
             ovr["server_name"] = val
+            self._save_relay_overrides()
             yield event.plain_result(f"✅ 消息互通目标服务器已设为: {val}")
+            return
+
+        if sub in ("模式", "mode"):
+            if val not in ("off", "global", "custom"):
+                yield event.plain_result("用法: /消息互通 模式 <off|global|custom>\noff=不互通 global=遵循全局 custom=独立配置")
+                return
+            ovr["mode"] = val
+            self._save_relay_overrides()
+            labels = {"off": "❌ 不互通", "global": "🔵 遵循全局", "custom": "🟢 独立配置"}
+            yield event.plain_result(f"✅ 消息互通模式已设为: {labels.get(val, val)}")
+            return
+
+        if sub in ("群到服", "group_to_mc", "gtm"):
+            if val not in ("on", "1", "开", "开启", "启用", "off", "0", "关", "关闭", "禁用"):
+                yield event.plain_result("用法: /消息互通 群到服 <开|关>")
+                return
+            v = val in ("on", "1", "开", "开启", "启用")
+            ovr["mode"] = "custom"
+            ovr["group_to_mc"] = v
+            self._save_relay_overrides()
+            yield event.plain_result(f"✅ 群→服转发已{'开启' if v else '关闭'}（模式: 独立配置）")
+            return
+
+        if sub in ("服到群", "mc_to_group", "mtg"):
+            if val not in ("on", "1", "开", "开启", "启用", "off", "0", "关", "关闭", "禁用"):
+                yield event.plain_result("用法: /消息互通 服到群 <开|关>")
+                return
+            v = val in ("on", "1", "开", "开启", "启用")
+            ovr["mode"] = "custom"
+            ovr["mc_to_group"] = v
+            self._save_relay_overrides()
+            yield event.plain_result(f"✅ 服→群转发已{'开启' if v else '关闭'}（模式: 独立配置）")
+            return
+
+        if sub in ("仅msay", "msay_only", "require_msay", "msay"):
+            if val not in ("on", "1", "开", "开启", "启用", "off", "0", "关", "关闭", "禁用"):
+                yield event.plain_result("用法: /消息互通 仅msay <开|关>\n开启后只会通过 /msay 命令转发消息，不自动转发群消息")
+                return
+            v = val in ("on", "1", "开", "开启", "启用")
+            ovr["mode"] = "custom"
+            ovr["require_msay"] = v
+            self._save_relay_overrides()
+            yield event.plain_result(f"✅ 仅 /msay 命令互通已{'开启' if v else '关闭'}（模式: 独立配置）{' 只有通过 /msay 命令才能发消息到 MC' if v else ' 群内所有消息将自动转发到 MC'}")
             return
 
         yield event.plain_result(
@@ -1648,6 +1845,8 @@ class MrconPlugin(Star):
         cfg = self._get_relay_config(gid)
         if not cfg["enabled"] or not cfg["group_to_mc"]:
             return
+        if cfg.get("require_msay", False):
+            return  # 仅允许 /msay 命令互通，不自动转发群消息
         text = str(getattr(event, "message_str", "") or "")
         if not text or text.startswith("/"):
             return
@@ -2042,12 +2241,18 @@ class MrconPlugin(Star):
             "▎🔗 群服消息互联\n"
             "  /msay <消息>          主动发送消息到MC公屏 （别名：/群说 /服说）\n"
             "  /消息互通             查看本群消息互通状态与配置\n"
-            "  /消息互通 开|关        开关本群消息转发\n"
-            "  /消息互通 格式 <文本>   自定义转发格式（{name}/{msg}）\n"
-            "  /消息互通 服 <名称>     指定目标服务器（独立分配）\n"
-            "  /消息互通 重置          恢复全局默认配置\n"
+            "  /消息互通 开|关        开关本群消息互通（开=独立配置，关=不互通）\n"
+            "  /消息互通 模式 <off|global|custom>  设置模式（不互通/遵循全局/独立）\n"
+            "  /消息互通 群到服 <开|关>   独立配置群→服转发\n"
+            "  /消息互通 服到群 <开|关>   独立配置服→群转发\n"
+            "  /消息互通 仅msay <开|关>    仅允许 /msay 命令互通（不自动转发）\n"
+            "  /消息互通 格式 <文本>      自定义转发格式（{name}/{msg}）\n"
+            "  /消息互通 服 <名称>        指定目标服务器\n"
+            "  /消息互通 重置             恢复默认（模式=off，不互通）\n"
+            "  ⚠ 服→群转发需 MC 配套模组（开发中），群→服已可用\n"
+            "  模组发布后从 GitHub 下载安装到 MC 服即可，详见 README\n"
             "\n"
-            "▎🌐 Web 管理面板  v3.9.6\n"
+            "▎🌐 Web 管理面板  v3.11.1\n"
             "  浏览器访问 http://localhost:9949 图形化管理所有配置\n"
             "  （基于原生 asyncio TCP，零外部依赖，15 个功能模块）\n"
             "  • 📊 仪表盘总览（卡片点击跳转）   • 🖥️ 服务器增删改查 + 投票\n"

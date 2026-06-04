@@ -130,11 +130,23 @@ pre{background:var(--bg);padding:12px;border-radius:4px;font-size:12px;overflow-
 .rl-ctrls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .rl-lbl{font-size:11px;color:var(--m)}
 .rl-row{display:flex;align-items:center;gap:6px;width:100%;margin-top:4px;flex-wrap:wrap}
+.fmt-ed{display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding:4px 6px;background:var(--bg);border:1px solid var(--b);border-radius:4px;min-height:28px}
+.fmt-chip{display:inline-flex;align-items:center;padding:2px 7px;border-radius:3px;font-size:11px;cursor:pointer;transition:opacity .15s}
+.fmt-chip:hover{opacity:.7}
+.fmt-chip.fc-tx{background:rgba(255,255,255,.08);color:var(--t)}
+.fmt-chip.fc-ph{background:rgba(147,112,219,.35);color:#d4bfff}
+.fmt-chip.fc-ma{background:rgba(56,182,121,.35);color:#b5e8ce}
+.fmt-add{display:inline-flex;align-items:center;gap:3px}
+.fmt-add button{padding:2px 8px;font-size:10px;border-radius:3px;cursor:pointer;border:1px dashed var(--b);background:transparent;color:var(--m);white-space:nowrap}
+.fmt-add button:hover{background:var(--t2);color:var(--t)}
+.fmt-add .fa-cust{color:var(--s);font-weight:bold}
+.fmt-row{display:flex;align-items:flex-start;gap:6px;flex-direction:column;width:100%}
+.fmt-row .fmt-title{font-size:11px;color:var(--m);white-space:nowrap}
 </style>
 </head>
 <body>
 <div class="sb" id="sb">
-  <h2>MRCon<span class="ver">v3.9.6</span></h2>
+  <h2>MRCon<span class="ver">v3.11.1</span></h2>
   <nav>
     <a href="#dashboard" class="on" data-tab="dashboard">📊 仪表盘</a>
     <a href="#servers" data-tab="servers">🖥️ 服务器管理</a>
@@ -212,17 +224,25 @@ async function edSvr(gid,idx){var s=await fj(A+"/servers/"+gid+"/"+idx);var m='<
 async function doEdSvr(gid,idx){var b={name:document.getElementById("efn").value.trim(),rcon_host:document.getElementById("efh").value.trim(),rcon_port:document.getElementById("efp").value.trim(),rcon_password:document.getElementById("efpw").value.trim(),game_port:document.getElementById("efgp").value.trim(),whitelist_qqs:document.getElementById("efw").value.split(",").map(function(s){return s.trim()}).filter(Boolean),public_commands:document.getElementById("efu").value.split(",").map(function(s){return s.trim()}).filter(Boolean),relay_enabled:document.getElementById("efrl").value=="1",query_enabled:document.getElementById("efq").value=="1",shared:document.getElementById("efsh").value=="1",vote_enabled:document.getElementById("efvt0").value=="1",vote_threshold:parseInt(document.getElementById("efvt").value)||3,vote_ttl:parseInt(document.getElementById("efvttl").value)||60,vote_min_agree_on_timeout:parseInt(document.getElementById("efvma").value)||1,vote_tie_strategy:document.getElementById("efvts").value,admin_decide_ttl:parseInt(document.getElementById("efatl").value)||120};await pjt(A+"/servers/"+gid+"/"+idx,b);document.getElementById("es-m")?.remove();toast("已更新");loS()}
 async function rmSvr(gid,idx){if(!confirm("确定删除？"))return;await fetch(A+"/servers/"+gid+"/"+idx,{method:"DELETE"});toast("已删除");loS()}
 /* ====== 群服互联 ====== */
-async function loRe(){var g=await fj(A+"/groups"),all=await fj(A+"/relay/all"),gc=await fj(A+"/config/relay");var allSrv=[],seen={};for(var gid in g){var srvs=g[gid]||[];for(var i=0;i<srvs.length;i++){var s=srvs[i];var sn=s.server_name||s.name||'';if(sn&&!seen[sn]){seen[sn]=true;allSrv.push(sn)}}}var h='<div class="ct"><h3>全局互联设置</h3><table><tr><th>总开关</th><th>群→服</th><th>服→群</th><th>群→服格式</th><th>服→群格式</th></tr><tr><td><label class="tg" title="全局群服互联总开关"><input type="checkbox" '+(gc.relay_enabled?'checked':'')+' onchange="relayGlobalSet(\'relay_enabled\',this.checked)"><span class="sl"></span></label></td><td><label class="tg" title="全局群聊→服务器消息转发"><input type="checkbox" '+(gc.relay_group_to_mc?'checked':'')+' onchange="relayGlobalSet(\'relay_group_to_mc\',this.checked)"><span class="sl"></span></label></td><td><label class="tg" title="全局服务器→群聊消息转发"><input type="checkbox" '+(gc.relay_mc_to_group?'checked':'')+' onchange="relayGlobalSet(\'relay_mc_to_group\',this.checked)"><span class="sl"></span></label></td><td><input style="width:130px" value="'+(gc.relay_fmt_group||'[QQ] {nick}: {msg}')+'" onchange="relayGlobalSet(\'relay_fmt_group\',this.value)" title="群→服消息格式"></td><td><input style="width:140px" value="'+(gc.relay_fmt_mc||'[{server}] {player}: {msg}')+'" onchange="relayGlobalSet(\'relay_fmt_mc\',this.value)" title="服→群消息格式"></td></tr></table></div><div class="fb" style="margin:16px 0 8px"><h3 style="margin:0">群-服绑定</h3><button class="b1 bsm" onclick="relayAutoBind()" title="自动将每个群绑定到其第一个 RCON 服务器">🔄 自动绑定所有</button></div>';var has=false;for(var gid in g){var entries=all[gid]||[],srvs=g[gid]||[],nm=gn(srvs),dnm=(nm?nm+' (':'')+'QQ:'+gid+(nm?')':'');if(!entries.length)entries=[{server_name:srvs[0]?.server_name||srvs[0]?.name||'',group_to_mc:true,mc_to_group:true}];has=true;h+='<div class="rl-card"><span class="rl-grp">'+dnm+'</span><button class="b1 bsm" style="font-size:11px" onclick="relayAddEntry(\''+gid+'\')" title="添加额外服务器绑定">+ 添加</button>';for(var j=0;j<entries.length;j++){var e=entries[j]||{},esn=e.server_name||'';h+='<div class="rl-row"><span class="rl-arrow">→</span><select class="rl-sel" onchange="relaySetEntry(\''+gid+'\','+j+',\'server_name\',this.value)" title="选择目标服务器">';for(var k=0;k<allSrv.length;k++){h+='<option value="'+allSrv[k]+'"'+(allSrv[k]===esn?' selected':'')+'>'+allSrv[k]+'</option>'}h+='</select><span class="rl-lbl">群→服</span><label class="tg" title="群聊→服务器转发"><input type="checkbox" '+(e.group_to_mc!==false?'checked':'')+' onchange="relaySetEntry(\''+gid+'\','+j+',\'group_to_mc\',this.checked)"><span class="sl"></span></label><span class="rl-lbl">服→群</span><label class="tg" title="服务器→群聊转发"><input type="checkbox" '+(e.mc_to_group!==false?'checked':'')+' onchange="relaySetEntry(\''+gid+'\','+j+',\'mc_to_group\',this.checked)"><span class="sl"></span></label>';if(entries.length>1){h+='<button class="bd bsm" style="font-size:10px;padding:2px 6px" onclick="relayDelEntry(\''+gid+'\','+j+')" title="移除此绑定">✕</button>'}h+='</div>'}h+='</div>'}if(!has)h+='<div class="emp">暂无群聊</div>';document.getElementById("main").innerHTML=h}
+async function loRe(){var g=await fj(A+"/groups"),all=await fj(A+"/relay/all"),gc=await fj(A+"/config/relay");window._gc=gc;var allSrv=[],seen={};for(var gid in g){var srvs=g[gid]||[];for(var i=0;i<srvs.length;i++){var s=srvs[i];var sn=s.server_name||s.name||'';if(sn&&!seen[sn]){seen[sn]=true;allSrv.push(sn)}}}var h='<div class="ct"><h3>全局互联设置</h3><table><tr><th>群→服</th><th>服→群</th><th>必须 /msay</th><th>群→服格式</th><th>服→群格式</th></tr><tr><td><label class="tg" title="全局群聊→服务器消息转发"><input type="checkbox" '+(gc.relay_group_to_mc?'checked':'')+' onchange="relayGlobalSet(\'relay_group_to_mc\',this.checked)"><span class="sl"></span></label></td><td><label class="tg" title="全局服务器→群聊消息转发"><input type="checkbox" '+(gc.relay_mc_to_group?'checked':'')+' onchange="relayGlobalSet(\'relay_mc_to_group\',this.checked)"><span class="sl"></span></label></td><td><label class="tg" title="必须 /msay 才允许转发"><input type="checkbox" '+(gc.relay_require_msay?'checked':'')+' onchange="relayGlobalSet(\'relay_require_msay\',this.checked)"><span class="sl"></span></label></td><td style="min-width:200px">'+fmtEditor('fmt_group',gc.relay_fmt_group||'[QQ] {name}: {msg}','','',true)+'</td><td style="min-width:200px">'+fmtEditor('fmt_mc',gc.relay_fmt_mc||'[MC] {player}: {msg}','','',true)+'</td></tr></table></div><div class="ct" style="margin:8px 0;background:rgba(255,193,7,.06);border:1px dashed rgba(255,193,7,.25);padding:8px 12px;border-radius:4px;font-size:11px;line-height:1.6"><span style="color:var(--m)">⚠ 服→群转发需 MC 服务端安装配套模组：</span><a href="https://github.com/rogergzl/astrbot_plugin_mrconop" target="_blank" style="color:var(--s);text-decoration:underline;margin-left:4px">📥 下载 MC 模组（待开发）</a><br><span style="color:var(--m);font-size:10px">当前服→群暂不可用，待模组发布后安装到 MC 服务器即可生效</span></div><div class="fb" style="margin:16px 0 8px"><h3 style="margin:0">群-服绑定</h3><button class="b1 bsm" onclick="relayAutoBind()">🔄 自动绑定所有</button></div>';var has=false;for(var gid in g){var entries=all[gid]||[],srvs=g[gid]||[],nm=gn(srvs),dnm=(nm?nm+' (':'')+'QQ:'+gid+(nm?')':'');if(!entries.length)entries=[{server_name:srvs[0]?.server_name||srvs[0]?.name||'',group_to_mc:true,mc_to_group:true,mode:'off'}];has=true;var mode=(entries[0]&&entries[0].mode)||'off';h+='<div class="rl-card"><span class="rl-grp">'+dnm+'</span><select style="width:100px;margin-right:8px" onchange="relaySetMode(\''+gid+'\',this.value)"><option value="off"'+(mode==='off'?' selected':'')+'>不互通</option><option value="global"'+(mode==='global'?' selected':'')+'>遵循全局</option><option value="custom"'+(mode==='custom'?' selected':'')+'>独立配置</option></select><button class="b1 bsm" style="font-size:11px" onclick="relayAddEntry(\''+gid+'\')" title="添加额外服务器绑定">+ 添加</button>';var isCustom=mode==='custom';for(var j=0;j<entries.length;j++){var e=entries[j]||{},esn=e.server_name||'';h+='<div class="rl-row"><span class="rl-arrow">→</span><select class="rl-sel" onchange="relaySetEntry(\''+gid+'\','+j+',\'server_name\',this.value)" title="选择目标服务器">';for(var k=0;k<allSrv.length;k++){h+='<option value="'+allSrv[k]+'"'+(allSrv[k]===esn?' selected':'')+'>'+allSrv[k]+'</option>'}h+='</select><span class="rl-lbl">群→服</span><label class="tg" title="群聊→服务器转发"><input type="checkbox" '+(e.group_to_mc!==false?'checked':'')+' '+(isCustom?'':'disabled')+' onchange="relaySetEntry(\''+gid+'\','+j+',\'group_to_mc\',this.checked)"><span class="sl"></span></label><span class="rl-lbl">服→群</span><label class="tg" title="服务器→群聊转发"><input type="checkbox" '+(e.mc_to_group===true?'checked':'')+' '+(isCustom?'':'disabled')+' onchange="relaySetEntry(\''+gid+'\','+j+',\'mc_to_group\',this.checked)"><span class="sl"></span></label><span class="rl-lbl">必须 /msay 才允许转发</span><label class="tg" title="必须 /msay 才允许转发"><input type="checkbox" '+(e.require_msay===true?'checked':'')+' '+(isCustom?'':'disabled')+' onchange="relaySetEntry(\''+gid+'\','+j+',\'require_msay\',this.checked)"><span class="sl"></span></label>';if(isCustom){var hasGfmt=e.format_group!==undefined,hasMfmt=e.format_mc!==undefined;h+='<div class="fmt-row"><span class="fmt-title">群→服格式'+(hasGfmt?'':' <span style="color:var(--m);font-size:10px">(全局默认)</span>')+'</span>'+fmtEditor('format_group',e.format_group||gc.relay_fmt_group||'[QQ] {name}: {msg}',gid,j,true)+'</div><div class="fmt-row"><span class="fmt-title">服→群格式'+(hasMfmt?'':' <span style="color:var(--m);font-size:10px">(全局默认)</span>')+'</span>'+fmtEditor('format_mc',e.format_mc||gc.relay_fmt_mc||'[MC] {player}: {msg}',gid,j,true)+'</div>'};if(entries.length>1){h+='<button class="bd bsm" style="font-size:10px;padding:2px 6px" onclick="relayDelEntry(\''+gid+'\','+j+')" title="移除此绑定">✕</button>'}h+='</div>'}h+='</div>'}if(!has)h+='<div class="emp">暂无群聊</div>';document.getElementById("main").innerHTML=h}
 async function relayGlobalSet(key,val){var b={};b[key]=typeof val==="boolean"?val:val;await pjt(A+"/config/relay",b);toast("已更新");loRe()}
-async function relayAutoBind(){var g=await fj(A+"/groups"),all=await fj(A+"/relay/all");for(var id in g){var srvs=g[id]||[];if(srvs.length>0){var sn=srvs[0].server_name||srvs[0].name||'';if(sn){var exist=all[id]||[];if(!exist.some(function(e){return e.server_name===sn})){exist.push({server_name:sn,group_to_mc:true,mc_to_group:true});await pjt(A+"/relay/"+id,exist)}}}}toast("已自动绑定");loRe()}
-async function relayAddEntry(gid){var sn=prompt("输入要绑定的服务器名称");if(!sn)return;await pj(A+"/relay/"+gid,{server_name:sn.trim(),group_to_mc:true,mc_to_group:true});toast("已添加");loRe()}
+async function relaySetMode(gid,mode){var entries=await fj(A+"/relay/"+gid);if(!entries.length)entries=[{server_name:"",group_to_mc:true,mc_to_group:true}];for(var i=0;i<entries.length;i++)entries[i].mode=mode;await pjt(A+"/relay/"+gid,entries);toast("已更新模式");loRe()}
+async function relayAutoBind(){var g=await fj(A+"/groups"),all=await fj(A+"/relay/all");for(var id in g){var srvs=g[id]||[];if(srvs.length>0){var sn=srvs[0].server_name||srvs[0].name||'';if(sn){var exist=all[id]||[];if(!exist.some(function(e){return e.server_name===sn})){exist.push({server_name:sn,group_to_mc:true,mc_to_group:true,mode:'off'});await pjt(A+"/relay/"+id,exist)}}}}toast("已自动绑定");loRe()}
+async function relayAddEntry(gid){var sn=prompt("输入要绑定的服务器名称");if(!sn)return;await pj(A+"/relay/"+gid,{server_name:sn.trim(),group_to_mc:true,mc_to_group:true,mode:'custom'});toast("已添加");loRe()}
 async function relayDelEntry(gid,idx){if(!confirm("确定删除此绑定？"))return;var entries=await fj(A+"/relay/"+gid);if(idx<entries.length){entries.splice(idx,1);await pjt(A+"/relay/"+gid,entries);toast("已删除");loRe()}}
 async function relaySetEntry(gid,idx,key,val){var entries=await fj(A+"/relay/"+gid);if(idx<entries.length){entries[idx][key]=typeof val==="boolean"?val:val;await pjt(A+"/relay/"+gid,entries);toast("已更新")}}
 async function relaySetSrv(gid,name){await pjt(A+"/relay/"+gid,{server_name:name});toast("服务器已更新")}
 async function relayReset(gid){await fetch(A+"/relay/"+gid,{method:"DELETE"});toast("已重置");loRe()}
+/* 格式编辑器 */
+function parseFmt(f){var r=[],re=/\{[a-z_]+\}/g,l=0,m;while((m=re.exec(f))!==null){if(m.index>l)r.push({t:'tx',v:f.slice(l,m.index)});r.push({t:'ph',v:m[0]});l=m.index+m[0].length}if(l<f.length)r.push({t:'tx',v:f.slice(l)});return r}
+function fmtEditor(k,val,gid,j,custom){var gc=window._gc||{},p=parseFmt(val),cs='';for(var i=0;i<p.length;i++){var t=p[i].t==='ph'?'ph':'tx',lbl=p[i].v;if(t==='ph'){var ph={'{name}':'昵称','{msg}':'消息','{server}':'服务器','{player}':'MC玩家','{group}':'群名'}[lbl]||lbl;cs+='<span class="fmt-chip fc-ph" onclick="fmtChipRm(this)" title="占位符: '+lbl+'">'+lbl+'</span>'}else{cs+='<span class="fmt-chip fc-tx" onclick="fmtChipRm(this)" title="点击移除">'+lbl.replace(/</g,'&lt;')+'</span>'}}var ed='<div class="fmt-ed" data-k="'+k+'" data-g="'+(gid||'')+'" data-j="'+(j||0)+'" data-c="'+(custom?'1':'0')+'">'+cs;if(custom){var isGfmt=k==='fmt_group'||k==='format_group';ed+='<span class="fmt-add"><select onchange="fmtChipTmpl(this)" style="font-size:10px;padding:1px 4px;border:1px dashed var(--b);background:transparent;color:var(--m);border-radius:3px;cursor:pointer" title="选择预设模板"><option value="">📋 模板</option>'+(isGfmt?'<option value="'+gc.relay_fmt_group+'">全局默认: '+(gc.relay_fmt_group||'[QQ] {name}: {msg}')+'</option><option value="{name}: {msg}">昵称: 消息 （例: 小明: 大家好）</option><option value="[{server}] {name}: {msg}">[服务器] 昵称: 消息 （例: [生存服] 小明: 大家好）</option><option value="{msg}">仅消息内容 （例: 大家好）</option><option value="{name} 说: {msg}">昵称 说: 消息 （例: 小明 说: 大家好）</option>':'<option value="'+gc.relay_fmt_mc+'">全局默认: '+(gc.relay_fmt_mc||'[MC] {player}: {msg}')+'</option><option value="{player}: {msg}">玩家: 消息 （例: Steve: 大家好）</option><option value="[{server}] {player}: {msg}">[服务器] 玩家: 消息 （例: [生存服] Steve: 大家好）</option><option value="{msg}">仅消息内容 （例: 大家好）</option><option value="{player} 说: {msg}">玩家 说: 消息 （例: Steve 说: 大家好）</option>')+'</select>';ed+='<select onchange="fmtChipAdd(this)" style="font-size:10px;padding:1px 4px;border:1px dashed var(--b);background:transparent;color:var(--m);border-radius:3px;cursor:pointer"><option value="">+ 添加</option><option value="_txt">✏ 自定义文字</option><optgroup label="占位符（中文显示，内部英文）"><option value="{name}">昵称 {name}</option><option value="{msg}">消息内容 {msg}</option><option value="{server}">服务器名 {server}</option><option value="{player}">MC玩家 {player}</option><option value="{group}">群名 {group}</option></optgroup></select></span>'}ed+='</div>';return ed}
+async function fmtChipTmpl(sel){var v=sel.value;if(!v){sel.selectedIndex=0;return}sel.selectedIndex=0;var ed=sel.closest('.fmt-ed'),k=ed.dataset.k,g=ed.dataset.g,j=parseInt(ed.dataset.j)||0;if(g)await relaySetEntry(g,j,k,v);else await relayGlobalSet('relay_'+k,v);loRe()}
+async function fmtChipAdd(sel){var v=sel.value;if(!v){sel.selectedIndex=0;return}sel.selectedIndex=0;var ed=sel.closest('.fmt-ed'),k=ed.dataset.k,g=ed.dataset.g,j=parseInt(ed.dataset.j)||0;if(v==='_txt'){v=prompt('输入自定义文字');if(!v)return}var chips=Array.from(ed.querySelectorAll('.fmt-chip')),nv=chips.map(function(c){return c.textContent}).join('')+v;if(g)await relaySetEntry(g,j,k,nv);else await relayGlobalSet('relay_'+k,nv);loRe()}
+async function fmtChipRm(el){var ed=el.closest('.fmt-ed'),k=ed.dataset.k,g=ed.dataset.g,j=parseInt(ed.dataset.j)||0,chips=Array.from(ed.querySelectorAll('.fmt-chip')),idx=chips.indexOf(el),nv='';for(var i=0;i<chips.length;i++)if(i!==idx)nv+=chips[i].textContent;if(g)await relaySetEntry(g,j,k,nv);else await relayGlobalSet('relay_'+k,nv);loRe()}
 /* ====== 在线追踪 ====== */
-async function loTr(){var g=await fj(A+"/groups"),all=await fj(A+"/tracker/all"),gc=await fj(A+"/config/tracker"),h='<div class="ct"><h3>全局追踪设置</h3><table><tr><th>监控</th><th>提醒</th><th>提醒节点(分钟)</th><th>游戏内提醒</th><th>自动踢出</th><th>踢出阈值</th><th>封禁时长</th></tr><tr><td><span class="t1 '+(gc.tracker_enabled?'t-on':'t-off')+'">'+(gc.tracker_enabled?'已开启':'已关闭')+'</span></td><td><span class="t1 '+(gc.tracker_notify?'t-on':'t-off')+'">'+(gc.tracker_notify?'已开启':'已关闭')+'</span></td><td>'+(gc.tracker_notify_intervals||[]).join(',')+'</td><td><span class="t1 '+(gc.tracker_notify_game?'t-on':'t-off')+'">'+(gc.tracker_notify_game?'已开启':'已关闭')+'</span></td><td><span class="t1 '+(gc.tracker_kick_enabled?'t-on':'t-off')+'">'+(gc.tracker_kick_enabled?'已开启':'已关闭')+'</span></td><td>'+gc.tracker_kick_threshold+'分钟</td><td>'+gc.tracker_ban_minutes+'分钟</td></tr></table></div>';for(var id in g){var c=all[id]||{},srvs=g[id]||[],nm=gn(srvs),ov=Object.keys(c).length>0;h+='<div class="ct"><h3>'+(nm||('群 '+id))+'<span class="badge">'+(ov?'已覆盖':'继承全局')+'</span></h3><table><tr><th>提醒开关</th><th>提醒节点</th><th>游戏内提醒</th><th>踢出开关</th><th>踢出阈值</th><th>封禁时长</th><th>操作</th></tr><tr><td><label class="tg"><input type="checkbox" '+(c.notify_enabled?'checked':'')+' onchange="tkSet(\''+id+'\',\'notify_enabled\',this.checked)"><span class="sl"></span></label></td><td><input style="width:110px" value="'+(c.notify_intervals||gc.tracker_notify_intervals||'')+'" onchange="tkSet(\''+id+'\',\'notify_intervals\',this.value)"></td><td><label class="tg"><input type="checkbox" '+(c.notify_in_game?'checked':'')+' onchange="tkSet(\''+id+'\',\'notify_in_game\',this.checked)"><span class="sl"></span></label></td><td><label class="tg"><input type="checkbox" '+(c.kick_enabled?'checked':'')+' onchange="tkSet(\''+id+'\',\'kick_enabled\',this.checked)"><span class="sl"></span></label></td><td><input style="width:80px" value="'+(c.kick_threshold||gc.tracker_kick_threshold||'')+'" onchange="tkSet(\''+id+'\',\'kick_threshold\',this.value)"></td><td><input style="width:70px" value="'+(c.ban_minutes!==undefined?c.ban_minutes:gc.tracker_ban_minutes)+'" onchange="tkSet(\''+id+'\',\'ban_minutes\',this.value)"></td><td>'+(ov?'<button class="bd bsm" onclick="tkRs(\''+id+'\')">重置为全局</button>':'<span style="color:#555;font-size:10px">-</span>')+'</td></tr></table></div>'}if(!Object.keys(g).length)h+='<div class="emp">暂无群聊数据</div>';document.getElementById("main").innerHTML=h}
+async function loTr(){var g=await fj(A+"/groups"),all=await fj(A+"/tracker/all"),gc=await fj(A+"/config/tracker"),h='<div class="ct"><h3>全局追踪设置</h3><table><tr><th>监控</th><th>提醒</th><th>提醒节点(分钟)</th><th>游戏内提醒</th><th>自动踢出</th><th>踢出阈值</th><th>封禁时长</th><th>排行自动重置(小时)</th></tr><tr><td><label class="tg"><input type="checkbox" '+(gc.tracker_enabled?'checked':'')+' onchange="tkGlobalSet(\'tracker_enabled\',this.checked)"><span class="sl"></span></label></td><td><label class="tg"><input type="checkbox" '+(gc.tracker_notify?'checked':'')+' onchange="tkGlobalSet(\'tracker_notify\',this.checked)"><span class="sl"></span></label></td><td><input style="width:110px" value="'+(gc.tracker_notify_intervals||[]).join(',')+'" onchange="tkGlobalSet(\'tracker_notify_intervals\',this.value)"></td><td><label class="tg"><input type="checkbox" '+(gc.tracker_notify_game?'checked':'')+' onchange="tkGlobalSet(\'tracker_notify_game\',this.checked)"><span class="sl"></span></label></td><td><label class="tg"><input type="checkbox" '+(gc.tracker_kick_enabled?'checked':'')+' onchange="tkGlobalSet(\'tracker_kick_enabled\',this.checked)"><span class="sl"></span></label></td><td><input style="width:80px" value="'+gc.tracker_kick_threshold+'" onchange="tkGlobalSet(\'tracker_kick_threshold\',this.value)"></td><td><input style="width:70px" value="'+gc.tracker_ban_minutes+'" onchange="tkGlobalSet(\'tracker_ban_minutes\',this.value)"></td><td><input style="width:60px" value="'+(gc.ranking_reset_hours||0)+'" onchange="tkGlobalSet(\'ranking_reset_hours\',this.value)" title="0=不自动重置，24=每天，168=每周"></td></tr></table></div>';for(var id in g){var c=all[id]||{},srvs=g[id]||[],nm=gn(srvs),ov=Object.keys(c).length>0;h+='<div class="ct"><h3>'+(nm||('群 '+id))+'<span class="badge">'+(ov?'已覆盖':'继承全局')+'</span></h3><table><tr><th>提醒开关</th><th>提醒节点</th><th>游戏内提醒</th><th>踢出开关</th><th>踢出阈值</th><th>封禁时长</th><th>操作</th></tr><tr><td><label class="tg"><input type="checkbox" '+(c.notify_enabled?'checked':'')+' onchange="tkSet(\''+id+'\',\'notify_enabled\',this.checked)"><span class="sl"></span></label></td><td><input style="width:110px" value="'+(c.notify_intervals||gc.tracker_notify_intervals||'')+'" onchange="tkSet(\''+id+'\',\'notify_intervals\',this.value)"></td><td><label class="tg"><input type="checkbox" '+(c.notify_in_game?'checked':'')+' onchange="tkSet(\''+id+'\',\'notify_in_game\',this.checked)"><span class="sl"></span></label></td><td><label class="tg"><input type="checkbox" '+(c.kick_enabled?'checked':'')+' onchange="tkSet(\''+id+'\',\'kick_enabled\',this.checked)"><span class="sl"></span></label></td><td><input style="width:80px" value="'+(c.kick_threshold||gc.tracker_kick_threshold||'')+'" onchange="tkSet(\''+id+'\',\'kick_threshold\',this.value)"></td><td><input style="width:70px" value="'+(c.ban_minutes!==undefined?c.ban_minutes:gc.tracker_ban_minutes)+'" onchange="tkSet(\''+id+'\',\'ban_minutes\',this.value)"></td><td>'+(ov?'<button class="bd bsm" onclick="tkRs(\''+id+'\')">重置为全局</button>':'<span style="color:#555;font-size:10px">-</span>')+'</td></tr></table></div>'}if(!Object.keys(g).length)h+='<div class="emp">暂无群聊数据</div>';document.getElementById("main").innerHTML=h}
 async function tkSet(gid,key,val){var b={};if(key==="notify_intervals"){try{b[key]=val.split(",").map(function(s){return parseInt(s.trim())}).filter(function(n){return!isNaN(n)})}catch(e){return}}else if(typeof val==="boolean")b[key]=val;else{var n=parseInt(val);if(!isNaN(n))b[key]=n}await pjt(A+"/tracker/"+gid,b);toast("已更新")}
+async function tkGlobalSet(key,val){var b={};if(key==="tracker_notify_intervals"){try{b[key]=val.split(",").map(function(s){return parseInt(s.trim())}).filter(function(n){return!isNaN(n)})}catch(e){return}}else if(typeof val==="boolean")b[key]=val;else{var n=parseInt(val);if(!isNaN(n))b[key]=n}await pjt(A+"/config/tracker",b);toast("已更新全局追踪设置")}
 async function tkRs(gid){await fetch(A+"/tracker/"+gid,{method:"DELETE"});toast("已重置");loTr()}
 /* ====== 玩家管理 (可编辑) ====== */
 async function loP(sq){var u=A+"/players";if(sq)u+="?search="+encodeURIComponent(sq);var p=await fj(u);var h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">玩家管理 ('+(p?p.length:0)+'人)</h3><div class="if"><input placeholder="搜索 QQ号/MC ID..." style="width:220px" onkeyup="if(event.key===\'Enter\')loP(this.value)"><button class="b1 bsm" onclick="addPlayer()">+ 添加玩家</button><button class="bg bsm" onclick="importOnline()">从在线导入</button></div></div>';if(!p||!p.length){h+='<div class="emp">暂无玩家数据</div>';document.getElementById("main").innerHTML=h;return}h+='<div class="ct"><table><tr><th>QQ号</th><th>MC ID</th><th>积分</th><th>连续签到</th><th>最后签到</th><th>总在线时长</th><th>注册时间</th><th>操作</th></tr>';for(var i=0;i<p.length;i++){var r=p[i],dur=r.total_online_min?Math.floor(r.total_online_min/60)+"小时"+Math.floor(r.total_online_min%60)+"分钟":"-",ct=r.created_at?new Date(r.created_at*1000).toLocaleDateString("zh-CN"):"-";h+='<tr><td>'+r.qq_id+'</td><td><strong>'+(r.mc_id||"未绑定")+'</strong></td><td>'+r.points+'</td><td>'+(r.checkin_streak||0)+'天</td><td>'+(r.last_checkin_date||"-")+'</td><td>'+dur+'</td><td>'+ct+'</td><td><div class="ac"><button class="bp bsm" onclick="edPlayer(\''+r.qq_id+'\')">编辑</button><button class="bg bsm" onclick="edPlayerCmd(\''+r.qq_id+'\',\''+(r.mc_id||'').replace(/'/g,"\\'")+'\')">命令</button><button class="bd bsm" onclick="rmPlayer(\''+r.qq_id+'\')">删除</button></div></td></tr>'}h+='</table></div>';document.getElementById("main").innerHTML=h}
@@ -241,10 +261,11 @@ async function rjC(id){await fetch(A+"/compensations/"+id+"/reject",{method:"POS
 var avatarColors=["#e94560","#2ecc71","#3498db","#f39c12","#9b59b6","#1abc9c","#e74c3c","#34495e","#e67e22","#2980b9","#27ae60","#8e44ad"];
 function getInitials(n){if(!n)return"?";return n.substring(0,2).toUpperCase()}
 function getAvatarColor(n){var h=0;for(var i=0;i<n.length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}
-async function loOn(){var o=await fj(A+"/online"),rk=null;try{rk=await fj(A+"/online_ranking?limit=20")}catch(e){}var h='<div class="fb" style="margin-bottom:14px"><h3 style="margin:0">当前在线玩家</h3><button class="b2 bsm" onclick="refreshOnline()">刷新</button></div>';if(!o||!Object.keys(o).length){h+='<div class="emp">暂无玩家在线</div>'}else{var t=0;for(var k in o)t+=Object.keys(o[k]||{}).length;h+='<div style="color:var(--m);font-size:12px;margin-bottom:14px">共 '+t+' 名玩家在线</div>';for(var sid in o){var pl=o[sid]||{},kn=Object.keys(pl),sn=kn.length>0&&pl[kn[0]].server_name?pl[kn[0]].server_name:sid;h+='<div class="ct"><h3>🖥️ '+sn+'<span class="badge">'+kn.length+'人</span></h3><div class="oc-grid">';for(var nm in pl){var pp=pl[nm],mins=pp.session_minutes||0,hours=Math.floor(mins/60),rmins=mins%60,durTxt=hours>0?hours+"时"+rmins+"分":rmins+"分",pct=Math.min(100,mins>0?Math.round(mins/720*100):5),bgc=getAvatarColor(nm),loginAt=pp.login_at?new Date(pp.login_at*1000).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"}):"-";h+='<div class="oc"><div class="oc-av" style="background:'+bgc+'">'+getInitials(nm)+'</div><div class="oc-info"><div class="oc-name">'+nm+'</div><div class="oc-dur">⏱ '+durTxt+' | 登录 '+loginAt+'</div><div class="oc-bar"><div class="oc-bar-fill" style="width:'+pct+'%;background:'+bgc+'"></div></div></div></div>'}h+='</div></div>'}}if(rk&&rk.length){h+='<div class="ct" style="margin-top:12px"><h3>📊 在线时长排行 Top20</h3><table><tr><th>排名</th><th>服务器</th><th>玩家</th><th>总在线时长</th></tr>';for(var i=0;i<rk.length;i++){var r=rk[i],hh=Math.floor((r.total||0)/3600),mm=Math.floor(((r.total||0)%3600)/60);h+='<tr><td>'+(i+1)+'</td><td>'+(r.server_name||'-')+'</td><td>'+(r.player_name||'-')+'</td><td>'+hh+'小时'+mm+'分钟</td></tr>'}h+='</table></div>'}try{var oh=await fj(A+"/online_history?limit=70");if(oh&&oh.length){var maxM=1;for(var i=0;i<oh.length;i++){maxM=Math.max(maxM,oh[i].minutes||0)}h+='<div class="ct" style="margin-top:14px"><h3>📈 在线时长记录 (最近'+oh.length+'条)</h3><div class="oh-chart">';for(var i=0;i<oh.length;i++){var ri=oh[i],m=ri.minutes||0,hgt=Math.max(8,(m/maxM)*260),bgc=getAvatarColor(ri.player_name||"?"),mf=Math.floor(m),durTxt=mf>=60?Math.floor(mf/60)+'时'+(mf%60)+'分':mf+'分';h+='<div class="oh-bar" style="height:'+hgt+'px;background:'+bgc+'"><div class="oh-tip">'+ri.player_name+' @ '+(ri.server_name||'?')+'<br>'+ri.start_fmt+' ~ '+ri.end_fmt+'<br>'+durTxt+'</div></div>'}h+='</div></div>'}}catch(e){}document.getElementById("main").innerHTML=h;refresh(15000,loOn)}
+async function loOn(){var o=await fj(A+"/online"),rk=null;try{rk=await fj(A+"/online_ranking?limit=20")}catch(e){}var h='<div class="fb" style="margin-bottom:14px"><h3 style="margin:0">当前在线玩家</h3><button class="b2 bsm" onclick="refreshOnline()">刷新</button></div>';if(!o||!Object.keys(o).length){h+='<div class="emp">暂无玩家在线</div>'}else{var t=0;for(var k in o)t+=Object.keys(o[k]||{}).length;h+='<div style="color:var(--m);font-size:12px;margin-bottom:14px">共 '+t+' 名玩家在线</div>';for(var sid in o){var pl=o[sid]||{},kn=Object.keys(pl),sn=kn.length>0&&pl[kn[0]].server_name?pl[kn[0]].server_name:sid;h+='<div class="ct"><h3>🖥️ '+sn+'<span class="badge">'+kn.length+'人</span></h3><div class="oc-grid">';for(var nm in pl){var pp=pl[nm],mins=pp.session_minutes||0,hours=Math.floor(mins/60),rmins=mins%60,durTxt=hours>0?hours+"时"+rmins+"分":rmins+"分",pct=Math.min(100,mins>0?Math.round(mins/720*100):5),bgc=getAvatarColor(nm),loginAt=pp.login_at?new Date(pp.login_at*1000).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"}):"-";h+='<div class="oc"><div class="oc-av" style="background:'+bgc+'">'+getInitials(nm)+'</div><div class="oc-info"><div class="oc-name">'+nm+'</div><div class="oc-dur">⏱ '+durTxt+' | 登录 '+loginAt+'</div><div class="oc-bar"><div class="oc-bar-fill" style="width:'+pct+'%;background:'+bgc+'"></div></div></div></div>'}h+='</div></div>'}}if(rk&&rk.length){h+='<div class="ct" style="margin-top:12px"><div class="fb" style="margin-bottom:8px"><h3 style="margin:0">📊 在线时长排行 Top20</h3><button class="bd bsm" onclick="resetRanking()">重置排行</button></div><table><tr><th>排名</th><th>服务器</th><th>玩家</th><th>总在线时长</th></tr>';for(var i=0;i<rk.length;i++){var r=rk[i],hh=Math.floor((r.total||0)/3600),mm=Math.floor(((r.total||0)%3600)/60);h+='<tr><td>'+(i+1)+'</td><td>'+(r.server_name||'-')+'</td><td>'+(r.player_name||'-')+'</td><td>'+hh+'小时'+mm+'分钟</td></tr>'}h+='</table></div>'}try{var oh=await fj(A+"/online_history?limit=70");if(oh&&oh.length){var maxM=1;for(var i=0;i<oh.length;i++){maxM=Math.max(maxM,oh[i].minutes||0)}h+='<div class="ct" style="margin-top:14px"><h3>📈 在线时长记录 (最近'+oh.length+'条)</h3><div class="oh-chart">';for(var i=0;i<oh.length;i++){var ri=oh[i],m=ri.minutes||0,hgt=Math.max(8,(m/maxM)*260),bgc=getAvatarColor(ri.player_name||"?"),mf=Math.floor(m),durTxt=mf>=60?Math.floor(mf/60)+'时'+(mf%60)+'分':mf+'分';h+='<div class="oh-bar" style="height:'+hgt+'px;background:'+bgc+'"><div class="oh-tip">'+ri.player_name+' @ '+(ri.server_name||'?')+'<br>'+ri.start_fmt+' ~ '+ri.end_fmt+'<br>'+durTxt+'</div></div>'}h+='</div></div>'}}catch(e){}document.getElementById("main").innerHTML=h;refresh(15000,loOn)}
 async function refreshOnline(){toast("正在查询在线玩家...");try{var r=await pj(A+"/online/refresh",{});var parts=[];if(r.servers_ok>0)parts.push(r.servers_ok+"个服务器查询成功");if(r.servers_err>0)parts.push(r.servers_err+"个失败");parts.push("发现"+r.total_found+"人在线");toast("刷新完成: "+parts.join("，"))}catch(e){var msg=e.message;try{var j=JSON.parse(msg);msg=j.error||msg}catch(x){}toast(msg,true)}loOn()}
+async function resetRanking(){if(!confirm("确定要重置所有在线时长排行数据吗？此操作不可撤销。"))return;try{var r=await pj(A+"/online_ranking/reset",{});toast("已重置，删除了 "+r.deleted+" 条记录");loOn()}catch(e){var msg=e.message;try{var j=JSON.parse(msg);msg=j.error||msg}catch(x){}toast(msg,true)}}
 /* ====== 审计日志 ====== */
-async function loAu(){var g=await fj(A+"/groups"),a=await fj(A+"/audit?limit=100"),h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">审计日志 (最近100条)</h3><button class="b2 bsm" onclick="loAu()">刷新</button></div>';if(!a||!a.length){h+='<div class="emp">暂无审计日志</div>'}else{h+='<div class="ct"><table><tr><th>时间</th><th>QQ号</th><th>昵称</th><th>群聊</th><th>命令</th><th>结果</th><th>响应</th></tr>';for(var i=0;i<a.length;i++){var r=a[i],ts=r.time?new Date(r.time*1000).toLocaleString("zh-CN"):"-",grp=gn(g[r.group_id]||[]);h+='<tr><td>'+ts+'</td><td>'+r.sender_id+'</td><td>'+r.sender_name+'</td><td>'+(grp||(r.group_id?'群 '+r.group_id:'-'))+'</td><td><code style="font-size:10px">'+r.cmd+'</code></td><td><span class="t1 '+(r.ok?'t-on':'t-off')+'">'+(r.ok?'成功':'失败')+'</span></td><td style="max-width:200px;font-size:10px">'+(r.resp||'').slice(0,80)+'</td></tr>'}h+='</table></div>'}document.getElementById("main").innerHTML=h;refresh(20000,loAu)}
+async function loAu(cat){cat=cat||"";var u=A+"/audit?limit=100";if(cat)u+="&category="+cat;var g=await fj(A+"/groups"),a=await fj(u),h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">审计日志 (最近100条)</h3><button class="b2 bsm" onclick="loAu()">刷新</button></div><div class="fbar"><button class="bsm '+(cat===''?'bw':'b2')+'" onclick="loAu(\'\')">全部</button><button class="bsm '+(cat==='cmd'?'b1':'b2')+'" onclick="loAu(\'cmd\')">命令</button><button class="bsm '+(cat==='web'?'b1':'b2')+'" onclick="loAu(\'web\')">Web操作</button><button class="bsm '+(cat==='web_rcon'?'b1':'b2')+'" onclick="loAu(\'web_rcon\')">Web命令</button></div>';if(!a||!a.length){h+='<div class="emp">暂无审计日志</div>'}else{var catNames={cmd:"命令",web:"Web操作",web_rcon:"Web命令"};h+='<div class="ct"><table><tr><th>时间</th><th>类型</th><th>QQ号</th><th>昵称</th><th>群聊</th><th>操作</th><th>结果</th><th>详情</th></tr>';for(var i=0;i<a.length;i++){var r=a[i],ts=r.time?new Date(r.time*1000).toLocaleString("zh-CN"):"-",grp=gn(g[r.group_id]||[]),ct=r.category||"cmd",cn=catNames[ct]||ct;h+='<tr><td>'+ts+'</td><td><span class="badge" style="font-size:10px">'+cn+'</span></td><td>'+r.sender_id+'</td><td>'+r.sender_name+'</td><td>'+(grp||(r.group_id?'群 '+r.group_id:'-'))+'</td><td><code style="font-size:10px">'+r.cmd+'</code></td><td><span class="t1 '+(r.ok?'t-on':'t-off')+'">'+(r.ok?'成功':'失败')+'</span></td><td style="max-width:200px;font-size:10px">'+(r.resp||'').slice(0,80)+'</td></tr>'}h+='</table></div>'}document.getElementById("main").innerHTML=h;refresh(20000,loAu)}
 /* ====== 宏命令 ====== */
 async function loMa(){var m=await fj(A+"/macros"),h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">宏命令管理</h3><button class="b1 bsm" onclick="adMac()">+ 新建宏</button></div>';for(var n in m){h+='<div class="ct"><h3>'+n+'<span class="badge">'+m[n].length+'条命令</span><button class="bd bsm" style="float:right" onclick="rmMac(\''+n+'\')">删除</button></h3><pre>'+m[n].join("\n")+'</pre></div>'}if(!Object.keys(m).length)h+='<div class="emp">暂无宏命令</div>';document.getElementById("main").innerHTML=h}
 function adMac(){document.body.insertAdjacentHTML("beforeend",'<div class="mbg" id="mc-m" onclick="if(event.target===this)this.remove()"><div class="mod"><h3>新建宏</h3><div class="fg"><label>宏名称</label><input id="mfn"></div><div class="fg"><label>命令列表(一行一条命令)</label><textarea id="mfc" rows="6"></textarea></div><div class="fr" style="margin-top:14px"><button class="b1 bs" onclick="doMac()">保存</button><button class="b2 bs" onclick="document.getElementById(\'mc-m\').remove()">取消</button></div></div></div>')}
@@ -591,6 +612,10 @@ class WebServer:
         route = p.path
         params = parse_qs(p.query)
 
+        # ---------- MC→群消息转发（无需认证，内部 API） ----------
+        if route == "/api/mc_relay" and method == "POST":
+            return await self._api_mc_relay(body, params)
+
         # ---------- 登录/登出/首页/静态资源（无需认证） ----------
         if route == "/" or route == "":
             return self._html(PANEL_HTML)
@@ -653,7 +678,9 @@ class WebServer:
         if route == "/api/config/relay":
             if method == "PUT": return await self._api_config_relay_set(body)
             return self._api_config_relay()
-        if route == "/api/config/tracker": return self._api_config_tracker()
+        if route == "/api/config/tracker":
+            if method == "PUT": return await self._api_config_tracker_set(body)
+            return self._api_config_tracker()
         if route == "/api/config/all": return self._api_config_all()
         if route == "/api/config/save" and method == "PUT": return await self._api_save_config(body)
 
@@ -696,11 +723,14 @@ class WebServer:
         if route == "/api/online_ranking":
             limit = int(params.get("limit", ["20"])[0])
             return self._api_online_ranking(limit)
+        if route == "/api/online_ranking/reset" and method == "POST":
+            return self._api_online_ranking_reset()
 
         # ---------- 审计 ----------
         if route == "/api/audit":
             limit = int(params.get("limit", ["100"])[0])
-            return self._api_audit(limit)
+            category = params.get("category", [""])[0]
+            return self._api_audit(limit, category)
 
         # ---------- 宏 ----------
         if route == "/api/macros":
@@ -872,6 +902,18 @@ class WebServer:
     def _api_relay_all(self) -> bytes:
         return self._json(self._norm_relay(getattr(self.plugin, '_relay_overrides', {})))
 
+    async def _api_mc_relay(self, body: bytes, params: dict) -> bytes:
+        """POST /api/mc_relay — MC 服插件推送聊天消息到 QQ 群"""
+        data = self._read_body(body)
+        server_name = data.get("server", "") or params.get("server", [""])[0]
+        player = data.get("player", "")
+        msg = data.get("msg", "")
+        if not server_name or not player or not msg:
+            return self._json_err(400, "missing server/player/msg")
+        count = await self.plugin._on_mc_chat(server_name, player, msg)
+        logger.info(f"[mrcon] MC→群 relay: server={server_name} player={player} groups={count}")
+        return self._json({"ok": True, "groups": count})
+
     def _api_relay_get(self, gid: str) -> bytes:
         ov = self._norm_relay(getattr(self.plugin, '_relay_overrides', {}))
         return self._json(ov.get(gid, []))
@@ -888,6 +930,7 @@ class WebServer:
             return self._json_err(400, "invalid relay data")
         ov[gid] = entries
         self.plugin._relay_overrides = ov
+        self.plugin._save_relay_overrides()
         return self._json(entries)
 
     async def _api_relay_add(self, gid: str, body: bytes) -> bytes:
@@ -904,6 +947,7 @@ class WebServer:
         }
         ov.setdefault(gid, []).append(entry)
         self.plugin._relay_overrides = ov
+        self.plugin._save_relay_overrides()
         return self._json(entry)
 
     def _api_relay_del_entry(self, gid: str, idx: int) -> bytes:
@@ -917,12 +961,14 @@ class WebServer:
             else:
                 ov[gid] = entries
             self.plugin._relay_overrides = ov
+        self.plugin._save_relay_overrides()
         return self._json({"ok": True})
 
     def _api_relay_reset(self, gid: str) -> bytes:
         ov = getattr(self.plugin, '_relay_overrides', {})
         ov.pop(gid, None)
         self.plugin._relay_overrides = ov
+        self.plugin._save_relay_overrides()
         return self._json({"ok": True})
 
     # ==================== Tracker API ====================
@@ -963,6 +1009,7 @@ class WebServer:
             "relay_enabled": p.relay_enabled,
             "relay_group_to_mc": p.relay_group_to_mc,
             "relay_mc_to_group": p.relay_mc_to_group,
+            "relay_require_msay": p.relay_require_msay,
             "relay_fmt_group": p.relay_fmt_group,
             "relay_fmt_mc": p.relay_fmt_mc,
         })
@@ -972,7 +1019,7 @@ class WebServer:
         data = self._read_body(body)
         p = self.plugin
         rc = p.config.setdefault("relay", {})
-        bool_map = {"relay_enabled": "relay_enabled", "relay_group_to_mc": "relay_group_to_mc", "relay_mc_to_group": "relay_mc_to_group"}
+        bool_map = {"relay_enabled": "relay_enabled", "relay_group_to_mc": "relay_group_to_mc", "relay_mc_to_group": "relay_mc_to_group", "relay_require_msay": "relay_require_msay"}
         for k, attr in bool_map.items():
             if k in data:
                 rc[k] = bool(data[k])
@@ -995,7 +1042,38 @@ class WebServer:
             "tracker_kick_enabled": p.tracker_kick_enabled,
             "tracker_kick_threshold": p.tracker_kick_threshold,
             "tracker_ban_minutes": p.tracker_ban_minutes,
+            "ranking_reset_hours": p.ranking_reset_hours,
         })
+
+    async def _api_config_tracker_set(self, body: bytes) -> bytes:
+        """PUT: 更新全局追踪配置"""
+        data = self._read_body(body)
+        p = self.plugin
+        tc = p.config.setdefault("online_tracker", {})
+        bool_keys = ["tracker_enabled", "tracker_notify", "tracker_notify_game", "tracker_kick_enabled"]
+        int_keys = ["tracker_kick_threshold", "tracker_ban_minutes"]
+        for k in bool_keys:
+            if k in data:
+                tc[k.replace("tracker_", "")] = bool(data[k])
+                setattr(p, k, bool(data[k]))
+        for k in int_keys:
+            if k in data:
+                short = k.replace("tracker_", "")
+                tc[short] = int(data[k])
+                setattr(p, k, int(data[k]))
+        if "tracker_notify_intervals" in data:
+            val = data["tracker_notify_intervals"]
+            if isinstance(val, list):
+                tc["notify_intervals"] = sorted([int(x) for x in val], reverse=True)
+            else:
+                tc["notify_intervals"] = sorted([int(x) for x in str(val).split(",") if x.strip().isdigit()], reverse=True)
+            p.tracker_notify_intervals = tc["notify_intervals"]
+        if "ranking_reset_hours" in data:
+            tc["ranking_reset_interval_hours"] = int(data["ranking_reset_hours"])
+            p.ranking_reset_hours = int(data["ranking_reset_hours"])
+        p.config["online_tracker"] = tc
+        p.config.save_config()
+        return self._json({"ok": True})
 
     def _api_config_all(self) -> bytes:
         p = self.plugin
@@ -1133,6 +1211,8 @@ class WebServer:
                 conn.close()
         else:
             return self._json_err(500, "db not available")
+        if ok:
+            self.plugin._audit_web("player_edit", f"QQ={qq_id} MC={mc_id} pts={points}" + (f" →newQQ={new_qq_id}" if new_qq_id and new_qq_id != qq_id else ""))
         return self._json({"ok": ok}) if ok else self._json_err(404, "player not found")
 
     def _api_delete_player(self, qq_id: str) -> bytes:
@@ -1150,6 +1230,8 @@ class WebServer:
                 conn.close()
         else:
             return self._json_err(500, "db not available")
+        if ok:
+            self.plugin._audit_web("player_del", f"QQ={qq_id}")
         return self._json({"ok": ok}) if ok else self._json_err(404, "player not found")
 
     async def _api_import_online(self, params) -> bytes:
@@ -1167,6 +1249,7 @@ class WebServer:
             if not existing:
                 if db.insert_player_raw("0", name, 50, now):
                     imported += 1
+        self.plugin._audit_web("player_import", f"imported={imported} total_online={len(seen)}")
         return self._json({"ok": True, "imported": imported, "total_online": len(seen)})
 
     async def _api_save_config(self, body: bytes) -> bytes:
@@ -1297,6 +1380,7 @@ class WebServer:
             cfg.save_config()
         except Exception as e:
             return self._json_err(500, f"save failed: {e}")
+        self.plugin._audit_web("config_save", "配置已更新")
         return self._json({"ok": True, "msg": "配置已保存"})
 
     # ==================== RCON 命令执行 ====================
@@ -1315,8 +1399,10 @@ class WebServer:
         s = srvs[server_index]
         try:
             resp = await rcon_command(s["rcon_host"], int(s["rcon_port"]), s["rcon_password"], command)
+            self.plugin._audit_web_cmd(f"RCON: {command}", resp[:200], True)
             return self._json({"ok": True, "response": resp})
         except Exception as e:
+            self.plugin._audit_web_cmd(f"RCON: {command}", str(e)[:200], False)
             return self._json_err(500, f"RCON 执行失败: {e}")
 
     # ==================== 补偿 API ====================
@@ -1507,9 +1593,31 @@ class WebServer:
                 cursor.close()
         return self._json(rows)
 
+    def _api_online_ranking_reset(self) -> bytes:
+        """POST: 重置在线时长排行（清空 sessions 表）"""
+        p = self.plugin
+        now = int(time.time())
+        cooldown = 60
+        if p._last_online_refresh > 0 and now - p._last_online_refresh < cooldown:
+            remaining = cooldown - (now - p._last_online_refresh)
+            return self._json_err(429, f"操作过于频繁，请 {remaining} 秒后再试")
+        db = p.db
+        if hasattr(db, '_connect'):
+            conn = db._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM online_sessions")
+                conn.commit()
+                count = cur.rowcount
+            finally:
+                conn.close()
+            p._audit_web("ranking_reset", f"已清空 {count} 条在线记录")
+            return self._json({"ok": True, "deleted": count})
+        return self._json_err(500, "db not available")
+
     # ==================== 审计 API ====================
 
-    def _api_audit(self, limit: int) -> bytes:
+    def _api_audit(self, limit: int, category: str = "") -> bytes:
         af = getattr(self.plugin, 'audit_file', None)
         if not af or not os.path.exists(af):
             return self._json([])
@@ -1520,7 +1628,10 @@ class WebServer:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    entry = json.loads(line)
+                    if category and entry.get("category", "cmd") != category:
+                        continue
+                    entries.append(entry)
                 except json.JSONDecodeError:
                     continue
         entries.reverse()
@@ -1539,12 +1650,14 @@ class WebServer:
             return self._json_err(400, "missing name or commands")
         self.plugin.macros[name] = [str(c) for c in commands]
         self._save_macros()
+        self.plugin._audit_web("macro_add", f"name={name}")
         return self._json({"name": name, "commands": self.plugin.macros[name]}, status=201)
 
     def _api_del_macro(self, name: str) -> bytes:
         if name in self.plugin.macros:
             del self.plugin.macros[name]
             self._save_macros()
+            self.plugin._audit_web("macro_del", f"name={name}")
         return self._json({"ok": True})
 
     # ==================== 脚本 API ====================
