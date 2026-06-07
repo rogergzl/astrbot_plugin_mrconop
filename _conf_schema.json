@@ -47,11 +47,45 @@
         "hint": "一个群配置多个 RCON 服务器时，用户选择编号的超时时间",
         "default": 30
       },
+      "rcn_persistent": {
+        "description": "RCON 长连接",
+        "type": "bool",
+        "hint": "开启后使用持久连接池复用 RCON 连接，避免频繁短连接（连→发→断→循环）。关闭则每次命令新建连接",
+        "default": true
+      },
+      "rcon_keepalive_interval": {
+        "description": "RCON 保活间隔（秒）",
+        "type": "int",
+        "hint": "定期向连接池发送心跳命令的间隔。应小于 MC 服务端 rcon.timeout。0=禁用保活",
+        "default": 180
+      },
+      "rcon_idle_disconnect": {
+        "description": "RCON 空闲断开（秒）",
+        "type": "int",
+        "hint": "连接空闲超过此时间后主动断开以节省资源。0=不自动断开",
+        "default": 0
+      },
       "scripts_dir": {
         "description": "脚本存放目录（相对数据目录）",
         "type": "string",
         "hint": "rcscript 命令读取脚本的目录路径",
         "default": "scripts"
+      },
+      "log_event_macros": {
+        "description": "日志事件宏命令定义",
+        "type": "list",
+        "hint": "监听服务器日志事件，触发自定义 RCON 命令。每个宏包含: id, name, enabled, event_type, server_name, commands, cooldown",
+        "default": []
+      },
+      "event_macro_game_prefix": {
+        "description": "事件宏游戏内消息前缀",
+        "type": "string",
+        "hint": "当事件宏执行 say 命令时自动添加此前缀，如 §b[宏]", "default": "§b[宏]"
+      },
+      "game_notify_prefix": {
+        "description": "通用游戏通知前缀",
+        "type": "string",
+        "hint": "插件主动发送的游戏内通知（如 /bc）的前缀，如 §6[通知]", "default": "§6[通知]"
       }
     }
   },
@@ -77,17 +111,24 @@
     "hint": "定时查询在线玩家，记录在线时长；可配置时长提醒与超时自动踢出",
     "items": {
       "enabled": { "description": "启用在线时长监控", "type": "bool", "default": true },
-      "poll_interval_seconds": { "description": "轮询间隔（秒）", "type": "int", "hint": "每隔多少秒查询一次在线列表", "default": 60 },
+      "poll_mode": { "description": "扫描频率模式", "type": "string", "options": ["frequent", "smart", "custom"], "hint": "frequent=默认频繁模式, smart=有人时快速/无人时慢速(防短连接风暴), custom=自定固定频率", "default": "frequent" },
+      "poll_interval_seconds": { "description": "轮询间隔（秒）", "type": "int", "hint": "frequent/custom 模式的固定扫描间隔", "default": 60 },
+      "poll_idle_interval_seconds": { "description": "无人时扫描间隔（秒）", "type": "int", "hint": "仅 smart 模式生效，无人在线时慢速扫描", "default": 300 },
+      "poll_active_interval_seconds": { "description": "有人时扫描间隔（秒）", "type": "int", "hint": "仅 smart 模式生效，有人在线时快速扫描", "default": 60 },
       "query_method": { "description": "查询方式", "type": "string", "options": ["rcon", "mcstatus"], "hint": "rcon=通过RCON list命令, mcstatus=通过MC协议查询", "default": "rcon" },
       "notify_enabled": { "description": "启用在线时长提醒", "type": "bool", "hint": "玩家达到设定时长节点时发送提醒", "default": false },
       "notify_target": { "description": "提醒发送目标", "type": "string", "options": ["group", "admin_dm"], "hint": "group=发到群内, admin_dm=私聊管理员(附带群名)", "default": "group" },
       "notify_intervals": { "description": "提醒时长节点（分钟）", "type": "list", "items": { "type": "int" }, "hint": "玩家连续在线达到这些时长时提醒，如 [480, 360, 240]", "default": [480, 360, 240] },
       "notify_in_game": { "description": "在游戏内同步提醒", "type": "bool", "hint": "通过RCON say命令在游戏公屏提醒玩家", "default": false },
-      "notify_game_format": { "description": "游戏内提醒格式", "type": "string", "hint": "{player}=玩家名 {duration}=时长, RCON say命令发送", "default": "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！" },
+      "notify_game_format": { "description": "游戏内提醒格式", "type": "string", "hint": "{player}=玩家名 {duration}=时长, RCON say命令发送", "default": "{player} 已连续在线 {duration}，注意休息！" },
+      "notify_game_prefix": { "description": "游戏内提醒前缀", "type": "string", "hint": "RCON say命令的消息前缀颜色码，如 §e[在线提醒]", "default": "§e[在线提醒]" },
       "auto_kick_enabled": { "description": "启用超时自动踢出", "type": "bool", "hint": "玩家单次在线超过阈值时自动踢出", "default": false },
       "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 480 },
       "auto_kick_reason": { "description": "踢出原因文本", "type": "string", "hint": "支持 {player} 占位符替换为玩家名", "default": "你已连续在线过久，请休息一下！" },
-      "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 }
+      "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 },
+      "log_listener_enabled": { "description": "RCON 日志监听", "type": "bool", "hint": "监控服务器 latest.log 日志文件，实时识别玩家死亡/进出/成就事件，驱动事件宏命令。需在服务器管理中为对应服务器填写日志路径", "default": false },
+      "online_history_max_bars": { "description": "在线时长记录柱状图最大条数", "type": "int", "hint": "在线页面时长记录图表最多显示的条数。影响美观性：竖着的条数越多，单条越窄；建议不超过100~150条（约2-3天数据量）", "default": 70 },
+      "group_overrides": { "description": "分群覆盖配置", "type": "object", "hint": "各群的在线追踪独立设置，键为群号，值为覆盖字段对象（如 notify_enabled, kick_enabled 等）", "default": {}, "items": {} }
     }
   },
   "relay": {
@@ -99,6 +140,7 @@
       "enabled": { "description": "启用群服消息互联", "type": "bool", "default": false },
       "group_to_mc": { "description": "群聊消息 → MC", "type": "bool", "hint": "群内非命令消息转发到服务器 chat", "default": false },
       "mc_to_group": { "description": "MC 消息 → 群聊", "type": "bool", "hint": "服务器聊天消息转发到对应群（需 MC 模组）", "default": false },
+      "mc_to_group_log": { "description": "MC 消息 → 群聊（日志监听）", "type": "bool", "hint": "基于日志文件监听替代模组实现 MC→群，延迟 ~0.5-1s。需要开启日志监听并填写服务器日志路径。支持聊天/进出/死亡/成就事件", "default": false },
       "require_msay": { "description": "仅允许 /msay 命令互通", "type": "bool", "hint": "开启后只允许通过 /msay 主动转发，群聊消息不自动转发", "default": false },
       "format_group": { "description": "群→MC 消息格式", "type": "string", "hint": "{name}=群昵称, {msg}=消息内容", "default": "[QQ] {name}: {msg}" },
       "format_mc": { "description": "MC→群 消息格式", "type": "string", "hint": "{player}=玩家名, {msg}=消息内容", "default": "[MC] {player}: {msg}" },
@@ -190,7 +232,8 @@
       "host": { "description": "监听地址", "type": "string", "hint": "0.0.0.0=监听所有网卡（推荐）。127.0.0.1=仅本机访问", "default": "0.0.0.0" },
       "port": { "description": "监听端口", "type": "int", "hint": "HTTP 服务端口号，默认 9949", "default": 9949 },
       "password": { "description": "WebUI 登录密码", "type": "string", "hint": "留空则无需密码即可访问面板（仅内网使用）。设置后将使用 PBKDF2-SHA256 加密存储", "default": "" },
-      "session_timeout": { "description": "会话超时（秒）", "type": "int", "hint": "登录后无操作/后台多久自动登出，默认 600（10分钟）", "default": 600 }
+      "session_timeout": { "description": "会话超时（秒）", "type": "int", "hint": "登录后无操作/后台多久自动登出，默认 600（10分钟）", "default": 600 },
+      "log_viewer_refresh_ms": { "description": "日志查看器刷新间隔（毫秒）", "type": "int", "hint": "📄 日志查看器自动刷新间隔。间隔越短刷屏越严重，建议 ≥5000ms。设为 0 则关闭自动刷新", "default": 10000 }
     }
   }
 }

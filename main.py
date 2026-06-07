@@ -19,8 +19,9 @@ from astrbot.api.message_components import Plain
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
-from .transport import rcon_command
+from .transport import rcon_command, rcon_command_pool, get_pool
 from .database import Database
+from .log_listener import LogListenerManager
 
 
 # ==============================================================
@@ -74,6 +75,7 @@ class MrconPlugin(Star):
         self.web_panel_port = int(web_cfg.get("port", 9949) or 9949)
         self.web_panel_password = str(web_cfg.get("password", "") or "")
         self.web_panel_session_timeout = int(web_cfg.get("session_timeout", 600) or 600)
+        self.log_viewer_refresh_ms = int(web_cfg.get("log_viewer_refresh_ms", 10000) or 10000)
         self._web_panel = None  # 延迟初始化
         self._web_panel_task = None
 
@@ -111,6 +113,9 @@ class MrconPlugin(Star):
             tracker_cfg = {}
         self.tracker_enabled = bool(tracker_cfg.get("enabled", True))
         self.tracker_interval = int(tracker_cfg.get("poll_interval_seconds", 60) or 60)
+        self.tracker_poll_mode = str(tracker_cfg.get("poll_mode", "frequent") or "frequent")
+        self.tracker_idle_interval = int(tracker_cfg.get("poll_idle_interval_seconds", 300) or 300)
+        self.tracker_active_interval = int(tracker_cfg.get("poll_active_interval_seconds", 60) or 60)
         self.tracker_method = str(tracker_cfg.get("query_method", "rcon") or "rcon")
         self.tracker_notify = bool(tracker_cfg.get("notify_enabled", False))
         self.tracker_notify_target = str(tracker_cfg.get("notify_target", "group") or "group")
@@ -121,14 +126,26 @@ class MrconPlugin(Star):
         self.tracker_kick_threshold = int(tracker_cfg.get("auto_kick_threshold", 720) or 720)
         self.tracker_kick_reason = str(tracker_cfg.get("auto_kick_reason", "你已连续在线过久，请休息一下！") or "")
         self.tracker_notify_game = bool(tracker_cfg.get("notify_in_game", False))
-        self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！") or "")
+        self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "{player} 已连续在线 {duration}，注意休息！") or "")
+        self.tracker_game_prefix = str(tracker_cfg.get("notify_game_prefix", "§e[在线提醒]") or "")
+
+        # 事件宏游戏前缀
+        self.event_macro_game_prefix = str(general_cfg.get("event_macro_game_prefix", "§b[宏]") or "")
+        self.game_notify_prefix = str(general_cfg.get("game_notify_prefix", "§6[通知]") or "")
         self.tracker_ban_minutes = int(tracker_cfg.get("auto_kick_ban_minutes", 30) or 30)
         self.ranking_reset_hours = int(tracker_cfg.get("ranking_reset_interval_hours", 0) or 0)  # 0=不自动重置
         self._last_ranking_reset = 0
         self._pending_msgs = {}     # gid → [(msg, group_name)]
         self._last_umo = {}         # gid → unified_msg_origin
-        self._tracker_overrides = {}  # gid → {notify_enabled, notify_target, notify_intervals, kick_enabled, kick_threshold, kick_reason}
+        self._tracker_overrides = {}  # 稍后由 _load_tracker_overrides 填充
         self._pending_unbans = {}   # player_key → (unban_time, conf)
+
+        # 日志监听与事件宏
+        self.log_listener_enabled = bool(tracker_cfg.get("log_listener_enabled", False))
+        self.online_history_max_bars = int(tracker_cfg.get("online_history_max_bars", 70) or 70)
+        self._log_listener = LogListenerManager()
+        self._event_macros = list(general_cfg.get("log_event_macros", []) or [])
+        self._event_macro_cooldowns: dict[str, float] = {}  # macro_id → next_allowed_at
 
         relay_cfg = self.config.get("relay", {})
         if not isinstance(relay_cfg, dict):
@@ -139,6 +156,7 @@ class MrconPlugin(Star):
         self.relay_fmt_group = str(relay_cfg.get("format_group", "[QQ] {name}: {msg}"))
         self.relay_fmt_mc = str(relay_cfg.get("format_mc", "[MC] {player}: {msg}"))
         self.relay_require_msay = bool(relay_cfg.get("require_msay", False))  # 是否仅允许 /msay 命令互通
+        self.relay_mc_to_group_log = bool(relay_cfg.get("mc_to_group_log", False))  # 日志监听驱动的服→群（低延迟变相方案）
         self._relay_overrides = relay_cfg.get("group_settings", {})  # gid → [{server_name, ...}] 从配置持久化加载
 
         player_db_cfg = self.config.get("player_db", {})
@@ -194,10 +212,28 @@ class MrconPlugin(Star):
         self._trigger_cooldowns = {}
 
         self.plugin_data_dir = StarTools.get_data_dir("mrcon")
+        self._tracker_overrides = self._load_tracker_overrides()  # 从 JSON 文件加载群追踪覆盖
+        # 加载通用设置的独立持久化
+        gov = self._load_general_overrides()
+        if gov:
+            gc = self.config.setdefault("general", {})
+            for k, v in gov.items():
+                if k not in gc or not gc[k]:  # 仅在 config 缺失或为空时用文件值
+                    gc[k] = v
+            logger.info(f"[mrcon] 通用覆盖已同步到内存: {list(gov.keys())}")
         self.scripts_dir = os.path.join(self.plugin_data_dir, str(general_cfg.get("scripts_dir", "scripts") or "scripts"))
         self.audit_file = os.path.join(self.plugin_data_dir, "audit.log")
         self.pending_select = {}
         self.select_ttl = int(general_cfg.get("select_ttl", 30) or 30)
+        self.rcn_persistent = bool(general_cfg.get("rcn_persistent", True))
+        self.rcon_keepalive_interval = int(general_cfg.get("rcon_keepalive_interval", 180) or 180)
+        self.rcon_idle_disconnect = int(general_cfg.get("rcon_idle_disconnect", 0) or 0)
+        # 配置连接池参数
+        if self.rcn_persistent:
+            get_pool().configure(
+                keepalive_interval=self.rcon_keepalive_interval,
+                idle_disconnect=self.rcon_idle_disconnect,
+            )
 
         macros = self.config.get("macro_definitions", [])
         self.macros = {}
@@ -531,6 +567,9 @@ class MrconPlugin(Star):
             pass
         if self.tracker_enabled:
             self._tracker_task = asyncio.create_task(self._online_tracker_loop())
+        # 启动日志监听
+        if self.log_listener_enabled:
+            self._init_log_listeners()
         # 从数据库恢复在线状态
         try:
             state_rows = self.db.load_online_state()
@@ -575,6 +614,14 @@ class MrconPlugin(Star):
         if self._tracker_task:
             self._tracker_task.cancel()
             self._tracker_task = None
+        try:
+            await self._log_listener.stop()
+        except Exception:
+            pass
+        try:
+            await get_pool().close_all()
+        except Exception:
+            pass
         logger.info("[mrcon] plugin stopped")
 
     # ==============================================================
@@ -845,6 +892,13 @@ class MrconPlugin(Star):
             wl = self.group_map[gid].get("whitelist_qqs", [])
         return qq in set(str(x) for x in wl)
 
+    async def _rcn_send(self, host: str, port: int, password: str, cmd: str) -> str:
+        """发送RCON命令，根据配置选择长连接池或短连接模式"""
+        if self.rcn_persistent:
+            return await rcon_command_pool(host, port, password, cmd)
+        else:
+            return await rcon_command(host, port, password, cmd)
+
     async def transport_send(self, payload_json: str) -> str:
         try:
             data = json.loads(payload_json)
@@ -854,7 +908,7 @@ class MrconPlugin(Star):
         port = data.get("port")
         password = data.get("password")
         cmd = str(data.get("cmd", "") or "").strip()
-        resp = await rcon_command(host, port, password, cmd)
+        resp = await self._rcn_send(host, port, password, cmd)
         return resp
 
     async def execute_and_reply(self, event: AstrMessageEvent, command: str, desc: str):
@@ -1016,7 +1070,7 @@ class MrconPlugin(Star):
             for cmd in cmds:
                 cmd = str(cmd).replace("{player}", player).replace("{PLAYER}", player)
                 try:
-                    resp = await rcon_command(
+                    resp = await self._rcn_send(
                         conf["rcon_host"], int(conf["rcon_port"]),
                         conf["rcon_password"], cmd,
                     )
@@ -1083,7 +1137,7 @@ class MrconPlugin(Star):
         method = self.tracker_method
         if method == "rcon":
             try:
-                raw = await rcon_command(
+                raw = await self._rcn_send(
                     conf["rcon_host"], conf["rcon_port"], conf["rcon_password"], "list"
                 )
                 if ":" in raw:
@@ -1100,6 +1154,88 @@ class MrconPlugin(Star):
                 pass
         return []
 
+    def _load_tracker_overrides(self) -> dict:
+        """加载群追踪覆盖配置，优先独立 JSON 文件，回退 config"""
+        fpath = os.path.join(self.plugin_data_dir, "tracker_overrides.json")
+        self._tracker_overrides_file = fpath
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    logger.info(f"[mrcon] 从文件加载群追踪覆盖: {len(data)} 个群")
+                    return data
+            except Exception as e:
+                logger.warning(f"[mrcon] 读取tracker_overrides.json失败: {e}")
+        # 回退：从 config 加载并迁移到文件
+        tracker_cfg = self.config.get("online_tracker", {})
+        data = tracker_cfg.get("group_overrides", {}) if isinstance(tracker_cfg, dict) else {}
+        if data:
+            logger.info(f"[mrcon] 从config加载群追踪覆盖: {len(data)} 个群，将迁移至JSON文件")
+            self._tracker_overrides = data  # 先放入内存，再调用保存
+            self._save_tracker_overrides()
+            # 迁移后清除 config 中的旧数据，避免残留
+            try:
+                tracker_cfg.pop("group_overrides", None)
+                self.config["online_tracker"] = tracker_cfg
+                self.config.save_config()
+                logger.info("[mrcon] 已清除config.yaml中的旧group_overrides")
+            except Exception:
+                pass
+        return data
+
+    def _save_tracker_overrides(self):
+        """持久化 _tracker_overrides 到独立 JSON 文件（主）和 config.yaml（副）"""
+        ov = getattr(self, '_tracker_overrides', {})
+        if not isinstance(ov, dict):
+            ov = {}
+        # 主存储：独立 JSON 文件（不受 AstrBot 配置系统干扰）
+        try:
+            fpath = getattr(self, '_tracker_overrides_file', None)
+            if fpath:
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    json.dump(ov, f, ensure_ascii=False, indent=2)
+                logger.debug(f"[mrcon] tracker覆盖已保存到文件: {len(ov)} 个群")
+        except Exception as e:
+            logger.warning(f"[mrcon] 保存tracker覆盖到文件失败: {e}")
+        # 副存储：config（尽力写入，不阻塞）
+        try:
+            self.config.setdefault("online_tracker", {})["group_overrides"] = ov
+            self.config.save_config()
+        except Exception as e:
+            logger.debug(f"[mrcon] tracker覆盖config写入: {e}")
+
+    def _load_general_overrides(self) -> dict:
+        """加载通用设置的独立持久化（事件宏前缀、通知前缀等），优先 JSON 文件"""
+        fpath = os.path.join(self.plugin_data_dir, "general_overrides.json")
+        self._general_overrides_file = fpath
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    logger.info(f"[mrcon] 从文件加载通用覆盖: {list(data.keys())}")
+                    return data
+            except Exception as e:
+                logger.warning(f"[mrcon] 读取general_overrides.json失败: {e}")
+        return {}
+
+    def _save_general_overrides(self):
+        """持久化通用覆盖到独立 JSON 文件"""
+        gc = self.config.get("general", {}) if isinstance(self.config.get("general", {}), dict) else {}
+        keys_to_save = ["event_macro_game_prefix", "game_notify_prefix"]
+        data = {k: gc.get(k, "") for k in keys_to_save}
+        try:
+            fpath = getattr(self, '_general_overrides_file', None)
+            if fpath:
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                logger.debug(f"[mrcon] 通用覆盖已保存到文件")
+        except Exception as e:
+            logger.warning(f"[mrcon] 保存通用覆盖失败: {e}")
+
     def _get_tracker_config(self, gid: str) -> dict:
         """获取某群的在线监控配置，优先群内覆盖，否则回退全局"""
         override = self._tracker_overrides.get(str(gid), {})
@@ -1111,6 +1247,7 @@ class MrconPlugin(Star):
             "notify_intervals": override.get("notify_intervals", self.tracker_notify_intervals),
             "notify_game": override.get("notify_in_game", self.tracker_notify_game),
             "notify_game_format": override.get("notify_game_format", self.tracker_game_format),
+            "notify_game_prefix": override.get("notify_game_prefix", self.tracker_game_prefix),
             "kick_enabled": override.get("kick_enabled", self.tracker_kick_enabled),
             "kick_threshold": override.get("kick_threshold", self.tracker_kick_threshold),
             "kick_reason": override.get("kick_reason", self.tracker_kick_reason),
@@ -1121,7 +1258,11 @@ class MrconPlugin(Star):
         logger.info("[mrcon] 在线时长监控已启动")
         while True:
             try:
-                await asyncio.sleep(max(10, self.tracker_interval))
+                if self.tracker_poll_mode == "smart":
+                    interval = self.tracker_active_interval if self._online_cache else self.tracker_idle_interval
+                else:
+                    interval = self.tracker_interval
+                await asyncio.sleep(max(10, interval))
                 now = int(time.time())
                 all_servers = []
                 for gid, srvs in self.group_servers.items():
@@ -1138,7 +1279,7 @@ class MrconPlugin(Star):
                         ub = self._pending_unbans[key]
                         if now >= ub["unban_at"]:
                             try:
-                                await rcon_command(
+                                await self._rcn_send(
                                     ub["conf"]["rcon_host"], ub["conf"]["rcon_port"],
                                     ub["conf"]["rcon_password"], f"pardon {ub['player']}",
                                 )
@@ -1177,11 +1318,12 @@ class MrconPlugin(Star):
                                     self._pending_msgs.setdefault(str(gid), []).append(msg)
                                     # 游戏内提醒
                                     if tcfg["notify_game"]:
+                                        prefix = tcfg.get("notify_game_prefix", self.tracker_game_prefix)
                                         game_msg = tcfg["notify_game_format"].replace("{player}", player).replace("{duration}", dur_text)
                                         try:
-                                            await rcon_command(
+                                            await self._rcn_send(
                                                 conf["rcon_host"], conf["rcon_port"],
-                                                conf["rcon_password"], f"say {game_msg}",
+                                                conf["rcon_password"], f"say {prefix} {game_msg}",
                                             )
                                         except Exception as e:
                                             logger.error(f"[mrcon] 游戏内提醒失败: {e}")
@@ -1191,7 +1333,7 @@ class MrconPlugin(Star):
                             reason = tcfg["kick_reason"].replace("{player}", player)
                             kick_cmd = f"kick {player} {reason}"
                             try:
-                                await rcon_command(
+                                await self._rcn_send(
                                     conf["rcon_host"], conf["rcon_port"],
                                     conf["rcon_password"], kick_cmd,
                                 )
@@ -1200,7 +1342,7 @@ class MrconPlugin(Star):
                                 # 踢出后封禁
                                 ban_mins = tcfg["ban_minutes"]
                                 if ban_mins > 0:
-                                    await rcon_command(
+                                    await self._rcn_send(
                                         conf["rcon_host"], conf["rcon_port"],
                                         conf["rcon_password"], f"ban {player} {reason}",
                                     )
@@ -1239,6 +1381,168 @@ class MrconPlugin(Star):
                 break
             except Exception as e:
                 logger.error(f"[mrcon] 在线监控错误: {e}")
+
+    # ==============================================================
+    # 日志监听 & 事件宏
+    # ==============================================================
+    def _init_log_listeners(self):
+        """从所有已配置服务器收集带 log_path 的，注册到日志监听器"""
+        seen = set()
+        for gid, srvs in self.group_servers.items():
+            for srv in srvs:
+                sn = srv.get("server_name", "unknown")
+                log_mode = str(srv.get("log_mode", "") or "").strip()
+                # 兼容旧的 log_path (无 log_mode)
+                if not log_mode:
+                    legacy_path = str(srv.get("log_path", "") or "").strip()
+                    if legacy_path and legacy_path not in seen:
+                        seen.add(legacy_path)
+                        self._log_listener.add(sn, legacy_path)
+                    continue
+                # 文件模式: log_paths 列表
+                if log_mode == "file":
+                    log_paths = srv.get("log_paths", [])
+                    if isinstance(log_paths, str):
+                        log_paths = [p.strip() for p in log_paths.split(",") if p.strip()]
+                    for lp in log_paths:
+                        lp = str(lp).strip()
+                        if lp and lp not in seen:
+                            seen.add(lp)
+                            self._log_listener.add(sn, lp)
+                # 文件夹模式: log_folder + log_file_pattern
+                elif log_mode == "folder":
+                    folder = str(srv.get("log_folder", "") or "").strip()
+                    pattern = str(srv.get("log_file_pattern", "latest.log") or "latest.log").strip()
+                    if folder:
+                        lp = os.path.join(folder, pattern).replace("\\", "/")
+                        if lp not in seen:
+                            seen.add(lp)
+                            self._log_listener.add(sn, lp)
+        if seen:
+            self._log_listener.start(self._on_log_event)
+        else:
+            logger.warning("[mrcon] 日志监听已启用但无服务器配置 log_path，请在服务器管理中填写日志路径")
+
+    async def _on_log_event(self, server_name: str, event_type: str, player: str, raw_line: str):
+        """日志事件回调"""
+        logger.info(f"[LogEvent] [{server_name}] {event_type}: {player} ({raw_line[:60]})")
+
+        # 日志驱动的服→群互通（低延迟变相方案）
+        if self.relay_mc_to_group_log:
+            await self._relay_log_event_to_groups(server_name, event_type, player, raw_line)
+
+        # 匹配并执行事件宏
+        await self._execute_event_macros(server_name, event_type, player)
+
+    async def _relay_log_event_to_groups(self, server_name: str, event_type: str, player: str, raw_line: str):
+        """基于日志监听的 MC→群 消息转发（~0.5-1s 延迟）"""
+        import re as _re
+        # 从 raw_line 中提取聊天内容（chat 事件）
+        message = ""
+        if event_type == "chat":
+            m_chat = _re.search(r'<\s*\w+\s*>\s+(.+)', raw_line)
+            if m_chat:
+                message = m_chat.group(1).strip()
+            else:
+                return  # 无法解析聊天内容则跳过
+        elif event_type == "player_join":
+            message = f"{player} 加入了服务器 {server_name}"
+        elif event_type == "player_leave":
+            message = f"{player} 离开了服务器 {server_name}"
+        elif event_type == "player_death":
+            m_death = _re.search(r'\w+\s+(.+)', raw_line)
+            message = m_death.group(1).strip() if m_death else f"{player} 死亡"
+        elif event_type == "player_advancement":
+            m_adv = _re.search(r'\w+ has (.+)', raw_line)
+            message = m_adv.group(1).strip() if m_adv else f"{player} 获得成就"
+        else:
+            message = raw_line
+
+        count = 0
+        for gid, entries in list(self._relay_overrides.items()):
+            gid = str(gid)
+            entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
+            for entry in entry_list:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("server_name") != server_name:
+                    continue
+                mode = entry.get("mode", "off")
+                if mode == "off":
+                    continue
+                if mode == "global":
+                    fmt = self.relay_fmt_mc
+                elif mode == "custom":
+                    if not entry.get("mc_to_group"):
+                        continue
+                    fmt = entry.get("format_mc", self.relay_fmt_mc)
+                else:
+                    continue
+                text = fmt.replace("{player}", player).replace("{msg}", message).replace("{server}", server_name)
+                try:
+                    umo = f"napcat:GroupMessage:{gid}"
+                    chain = MessageChain(chain=[Plain(text)])
+                    await self.context.send_message(umo, chain)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"[mrcon] 日志互通 MC→群 失败 {gid}: {e}")
+        if count:
+            logger.info(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} → {count} 群")
+        else:
+            logger.debug(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} 无匹配群")
+
+    async def _execute_event_macros(self, server_name: str, event_type: str, player: str):
+        """遍历事件宏，匹配的则执行 RCON 命令"""
+        now = time.time()
+        for i, macro in enumerate(self._event_macros):
+            if not isinstance(macro, dict):
+                continue
+            if not macro.get("enabled", False):
+                continue
+            if macro.get("event_type", "") != event_type:
+                continue
+            # 检查冷却
+            cid = str(macro.get("id", str(i)))
+            cooldown = float(macro.get("cooldown", 0) or 0)
+            if cid in self._event_macro_cooldowns:
+                if now < self._event_macro_cooldowns[cid]:
+                    continue
+            # 查找目标服务器
+            target_srv = macro.get("server_name", "")
+            cmds = macro.get("commands", [])
+            if not isinstance(cmds, list):
+                cmds = [str(cmds)]
+            if not cmds:
+                continue
+            # 查找服务器配置
+            srv_conf = None
+            for gid, srvs in self.group_servers.items():
+                for srv in srvs:
+                    if srv.get("server_name", "") == target_srv:
+                        srv_conf = srv
+                        break
+                if srv_conf:
+                    break
+            if not srv_conf:
+                logger.debug(f"[LogEvent] 宏 '{macro.get('name','?')}' 目标服务器 '{target_srv}' 未找到")
+                continue
+            # 执行命令
+            for cmd in cmds:
+                cmd = str(cmd).replace("{player}", player).replace("{PLAYER}", player)
+                # 如果命令以 say 开头，自动添加前缀
+                if cmd.strip().lower().startswith("say ") and self.event_macro_game_prefix:
+                    cmd = "say " + self.event_macro_game_prefix + " " + cmd[4:].strip()
+                try:
+                    resp = await self._rcn_send(
+                        srv_conf["rcon_host"], int(srv_conf["rcon_port"]),
+                        srv_conf["rcon_password"], cmd,
+                    )
+                    logger.info(f"[LogEvent] 宏 '{macro.get('name','?')}' 执行: {cmd} -> {resp[:80]}")
+                except Exception as e:
+                    logger.warning(f"[LogEvent] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
+            # 记录冷却
+            if cooldown > 0:
+                self._event_macro_cooldowns[cid] = now + cooldown
 
     # ==============================================================
     # 玩家数据库
@@ -1584,6 +1888,9 @@ class MrconPlugin(Star):
             )
             return
 
+        # 任何修改操作均隐式关闭"使用全局"
+        ovr["use_global"] = False
+
         # === 逗号分隔批量配置 ===
         if "," in sub or "=" in sub:
             raw = str(getattr(event, "message_str", "") or "").strip()
@@ -1631,19 +1938,23 @@ class MrconPlugin(Star):
                         updated.append("关")
                     elif p == "重置":
                         self._tracker_overrides.pop(gid, None)
+                        self._save_tracker_overrides()
                         yield event.plain_result("🔵 已重置为全局默认配置")
                         return
+            self._save_tracker_overrides()
             yield event.plain_result(f"✅ 已更新: {', '.join(updated) if updated else '(无变更)'}")
             return
 
         # === 分步子命令 ===
         if sub == "重置":
             self._tracker_overrides.pop(gid, None)
+            self._save_tracker_overrides()
             yield event.plain_result("🔵 已重置为全局默认配置")
             return
 
         if sub in ("开", "关"):
             ovr["notify_enabled"] = (sub == "开")
+            self._save_tracker_overrides()
             yield event.plain_result(f"✅ 本群在线提醒已{'开启' if sub == '开' else '关闭'}")
             return
 
@@ -1656,6 +1967,7 @@ class MrconPlugin(Star):
                 if not intervals:
                     raise ValueError
                 ovr["notify_intervals"] = intervals
+                self._save_tracker_overrides()
                 yield event.plain_result(f"✅ 提醒节点已设为: {intervals} 分钟")
             except ValueError:
                 yield event.plain_result("节点格式错误，例: /在线提醒 节点 60,120,360")
@@ -1666,15 +1978,18 @@ class MrconPlugin(Star):
                 yield event.plain_result("目标应为 group 或 admin_dm")
                 return
             ovr["notify_target"] = val1
+            self._save_tracker_overrides()
             yield event.plain_result(f"✅ 提醒目标已设为: {val1}")
             return
 
         if sub == "游戏提醒":
             if val1.lower() in ("开", "1", "true", "yes"):
                 ovr["notify_in_game"] = True
+                self._save_tracker_overrides()
                 yield event.plain_result("✅ 游戏内提醒已开启")
             elif val1.lower() in ("关", "0", "false", "no"):
                 ovr["notify_in_game"] = False
+                self._save_tracker_overrides()
                 yield event.plain_result("✅ 游戏内提醒已关闭")
             else:
                 yield event.plain_result("用法: /在线提醒 游戏提醒 开|关")
@@ -1687,6 +2002,7 @@ class MrconPlugin(Star):
                 fmt = raw[idx + 4:].strip()
                 if fmt:
                     ovr["notify_game_format"] = fmt
+                    self._save_tracker_overrides()
                     yield event.plain_result("✅ 游戏内提醒格式已更新")
                     return
             yield event.plain_result("用法: /在线提醒 游戏格式 <文案>  ({player}=玩家 {duration}=时长)")
@@ -1695,6 +2011,7 @@ class MrconPlugin(Star):
         if sub == "封禁":
             try:
                 ovr["ban_minutes"] = int(val1)
+                self._save_tracker_overrides()
                 yield event.plain_result(f"✅ 踢出后封禁时长已设为 {val1} 分钟（0=不封禁）")
             except ValueError:
                 yield event.plain_result("封禁时长应为数字（分钟），0=不封禁")
@@ -1709,9 +2026,11 @@ class MrconPlugin(Star):
                     except ValueError:
                         yield event.plain_result("踢出阈值应为数字（分钟）")
                         return
+                self._save_tracker_overrides()
                 yield event.plain_result(f"✅ 踢出已开启（阈值 {ovr.get('kick_threshold', gcfg['kick_threshold'])} 分钟）")
             elif val1 == "关":
                 ovr["kick_enabled"] = False
+                self._save_tracker_overrides()
                 yield event.plain_result("✅ 踢出已关闭")
             elif val1 == "原因":
                 raw = str(getattr(event, "message_str", "") or "").strip()
@@ -1721,6 +2040,7 @@ class MrconPlugin(Star):
                         reason = raw[idx + len(needle):].strip()
                         if reason:
                             ovr["kick_reason"] = reason
+                            self._save_tracker_overrides()
                             yield event.plain_result("✅ 踢出原因已更新")
                             return
                 yield event.plain_result("用法: /在线提醒 踢出 原因 <文本>")
@@ -2268,7 +2588,7 @@ class MrconPlugin(Star):
             host = conf.get("rcon_host")
             port = conf.get("rcon_port")
             password = conf.get("rcon_password")
-            await rcon_command(host, port, password, cmd)
+            await self._rcn_send(host, port, password, cmd)
         except Exception as e:
             logger.debug(f"[mrcon] relay to MC failed: {e}")
 
@@ -2938,6 +3258,11 @@ class MrconPlugin(Star):
                 ("/消息互通 服 <名>", "指定目标服务器"),
                 ("/消息互通 格式 <文本>", "自定义格式 {name}/{msg}"),
                 ("/消息互通 重置", "恢复默认"),
+            ]),
+            ("📡 日志事件", [
+                ("日志监听 + 事件宏", "Web 脚本页管理"),
+                ("MC→群(日志) ~0.5s 延迟", "变相服→群，无需模组"),
+                ("/rc自定 <别名>", "自定义 RCON 命令"),
             ]),
             ("🌐 Web 面板", [
                 ("http://localhost:9949", "浏览器管理面板"),
