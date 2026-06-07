@@ -528,6 +528,9 @@ class MrconPlugin(Star):
                     f"host={s.get('rcon_host','?')}"
                 )
 
+        # 从 JSON 文件恢复服务器日志配置（覆盖可能丢失的 config）
+        self._load_server_log_configs()
+
         # 兼容旧版 string 格式 config，转换为 list 格式
         if isinstance(servers_raw, str) and servers_raw.strip():
             try:
@@ -1235,6 +1238,61 @@ class MrconPlugin(Star):
                 logger.debug(f"[mrcon] 通用覆盖已保存到文件")
         except Exception as e:
             logger.warning(f"[mrcon] 保存通用覆盖失败: {e}")
+
+    def _load_server_log_configs(self):
+        """从 JSON 文件加载服务器日志配置，覆盖到运行时 server 列表"""
+        fpath = os.path.join(self.plugin_data_dir, "server_log_configs.json")
+        self._server_log_configs_file = fpath
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict) or not data:
+                    return
+                restored = 0
+                for gid, srvs in self.group_servers.items():
+                    for s in srvs:
+                        sn = s.get("name", s.get("server_name", ""))
+                        if sn in data:
+                            lc = data[sn]
+                            for key in ("log_path", "log_mode", "log_paths", "log_folder", "log_file_pattern"):
+                                if key in lc:
+                                    s[key] = lc[key]
+                            restored += 1
+                if restored:
+                    logger.info(f"[mrcon] 从文件恢复了 {restored} 台服务器日志配置")
+            except Exception as e:
+                logger.warning(f"[mrcon] 读取server_log_configs.json失败: {e}")
+
+    def _save_server_log_configs(self):
+        """持久化所有服务器的日志配置到独立 JSON 文件"""
+        data = {}
+        for gid, srvs in self.group_servers.items():
+            for s in srvs:
+                sn = s.get("name", s.get("server_name", ""))
+                if not sn:
+                    continue
+                # 只保存有实质日志配置的服务器
+                entry = {}
+                for key in ("log_path", "log_mode", "log_paths", "log_folder", "log_file_pattern"):
+                    val = s.get(key)
+                    if val:  # 有值才存
+                        entry[key] = val
+                if entry:
+                    data[sn] = entry
+        if not data:
+            return
+        try:
+            fpath = getattr(self, '_server_log_configs_file', None)
+            if not fpath:
+                fpath = os.path.join(self.plugin_data_dir, "server_log_configs.json")
+                self._server_log_configs_file = fpath
+            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+            with open(fpath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.debug(f"[mrcon] 服务器日志配置已保存到文件: {len(data)} 台")
+        except Exception as e:
+            logger.warning(f"[mrcon] 保存服务器日志配置失败: {e}")
 
     def _get_tracker_config(self, gid: str) -> dict:
         """获取某群的在线监控配置，优先群内覆盖，否则回退全局"""
