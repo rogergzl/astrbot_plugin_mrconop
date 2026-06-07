@@ -4,7 +4,14 @@ import os
 import re
 import time
 from pathlib import Path
+from io import BytesIO
 from collections import defaultdict
+
+try:
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
@@ -102,7 +109,7 @@ class MrconPlugin(Star):
         tracker_cfg = self.config.get("online_tracker", {})
         if not isinstance(tracker_cfg, dict):
             tracker_cfg = {}
-        self.tracker_enabled = bool(tracker_cfg.get("enabled", False))
+        self.tracker_enabled = bool(tracker_cfg.get("enabled", True))
         self.tracker_interval = int(tracker_cfg.get("poll_interval_seconds", 60) or 60)
         self.tracker_method = str(tracker_cfg.get("query_method", "rcon") or "rcon")
         self.tracker_notify = bool(tracker_cfg.get("notify_enabled", False))
@@ -127,7 +134,7 @@ class MrconPlugin(Star):
         if not isinstance(relay_cfg, dict):
             relay_cfg = {}
         self.relay_enabled = bool(relay_cfg.get("enabled", False))
-        self.relay_group_to_mc = bool(relay_cfg.get("group_to_mc", True))
+        self.relay_group_to_mc = bool(relay_cfg.get("group_to_mc", False))
         self.relay_mc_to_group = bool(relay_cfg.get("mc_to_group", False))
         self.relay_fmt_group = str(relay_cfg.get("format_group", "[QQ] {name}: {msg}"))
         self.relay_fmt_mc = str(relay_cfg.get("format_mc", "[MC] {player}: {msg}"))
@@ -146,12 +153,45 @@ class MrconPlugin(Star):
         self.pdb_comp_admin = bool(player_db_cfg.get("compensation_require_admin", True))
         self.pdb_comp_blacklist = list(player_db_cfg.get("compensation_blacklist", []))
 
+        # 在线数据库配置
+        online_db_cfg = self.config.get("online_db", {})
+        if not isinstance(online_db_cfg, dict):
+            online_db_cfg = {}
+        # 优先从 player_db 读取统一存储配置，回退到 online_db
+        pdb_cfg = self.config.get("player_db", {})
+        if not isinstance(pdb_cfg, dict):
+            pdb_cfg = {}
+        def _dbcfg(key, default):
+            v = pdb_cfg.get(key)
+            if v is not None and v != "":
+                return v
+            v = online_db_cfg.get(key)
+            if v is not None and v != "":
+                return v
+            return default
+        self.online_db_storage_mode = str(_dbcfg("storage_mode", "local"))
+        self.online_db_read_source = str(_dbcfg("read_source", "local"))
+        self.online_db_ext_type = str(_dbcfg("external_type", "sqlite"))
+        self.online_db_ext_host = str(_dbcfg("external_host", ""))
+        self.online_db_ext_port = int(_dbcfg("external_port", 0) or 0)
+        self.online_db_ext_user = str(_dbcfg("external_user", ""))
+        self.online_db_ext_password = str(_dbcfg("external_password", ""))
+        self.online_db_ext_database = str(_dbcfg("external_database", ""))
+        self.online_db_ext_path = str(_dbcfg("external_db_path", ""))
+
         self.group_map = {}
         self.group_servers = {}
         self.partial_map = {}
         self.exec_votes = {}
         self.group_locks = {}
         self.rate_state = {}
+        self.configured_groups = []
+        self.named_server_pool = []
+        self.group_names = {}
+        self.server_templates = []
+        self.cmd_templates = []
+        self.online_triggers = []
+        self._trigger_cooldowns = {}
 
         self.plugin_data_dir = StarTools.get_data_dir("mrcon")
         self.scripts_dir = os.path.join(self.plugin_data_dir, str(general_cfg.get("scripts_dir", "scripts") or "scripts"))
@@ -166,7 +206,172 @@ class MrconPlugin(Star):
                 name = str(m.get("name", "")).strip()
                 cmds = m.get("commands", [])
                 if name and isinstance(cmds, list):
-                    self.macros[name] = [str(c) for c in cmds]
+                    # 新旧格式兼容：旧格式无 enabled 字段，默认启用
+                    if isinstance(m, dict) and "enabled" in m:
+                        self.macros[name] = {
+                            "commands": [str(c) for c in cmds],
+                            "enabled": bool(m.get("enabled", True)),
+                        }
+                    else:
+                        self.macros[name] = {
+                            "commands": [str(c) for c in cmds],
+                            "enabled": True,
+                        }
+
+        # 读取群号列表（独立于群服绑定）
+        groups_cfg = self.config.get("groups", [])
+        if isinstance(groups_cfg, list):
+            self.configured_groups = [str(g).strip() for g in groups_cfg if str(g).strip()]
+        logger.info(f"[mrcon] 已配置群号列表: {self.configured_groups}")
+
+        # 读取群号显示名称
+        gn = self.config.get("group_names", {})
+        if isinstance(gn, dict):
+            self.group_names = {str(k): str(v) for k, v in gn.items()}
+        logger.info(f"[mrcon] 群名称: {self.group_names}")
+
+        # 读取服务器配置模板
+        self.server_templates_path = os.path.join(self.plugin_data_dir, "server_templates.json")
+        try:
+            if os.path.exists(self.server_templates_path):
+                with open(self.server_templates_path, "r", encoding="utf-8") as f:
+                    self.server_templates = json.load(f)
+                    if not isinstance(self.server_templates, list):
+                        self.server_templates = []
+            logger.info(f"[mrcon] 已加载 {len(self.server_templates)} 个服务器模板")
+        except Exception as e:
+            logger.warning(f"[mrcon] 服务器模板加载失败: {e}")
+            self.server_templates = []
+
+        # 读取参数化命令模板（首次自动创建示例模板）
+        self.cmd_templates_path = os.path.join(self.plugin_data_dir, "cmd_templates.json")
+        try:
+            if os.path.exists(self.cmd_templates_path):
+                with open(self.cmd_templates_path, "r", encoding="utf-8") as f:
+                    self.cmd_templates = json.load(f)
+                    if not isinstance(self.cmd_templates, list):
+                        self.cmd_templates = []
+            if not self.cmd_templates:
+                self.cmd_templates = [
+                    {
+                        "name": "设置属性",
+                        "desc": "添加玩家属性修饰符 (移速/攻击力/生命等)",
+                        "enabled": False,
+                        "commands": [
+                            "/attribute {player} {attribute} modifier add {uuid} {modifier_name} {value} {operation}"
+                        ],
+                        "params": [
+                            {"key": "player", "label": "玩家ID", "default": ""},
+                            {"key": "attribute", "label": "属性类型", "default": "minecraft:generic.movement_speed"},
+                            {"key": "uuid", "label": "修饰符UUID", "default": ""},
+                            {"key": "modifier_name", "label": "修饰符名称", "default": "bonus"},
+                            {"key": "value", "label": "数值", "default": "0.1"},
+                            {"key": "operation", "label": "运算方式(add/multiply_base/multiply_total)", "default": "add"},
+                        ],
+                    },
+                    {
+                        "name": "查询UUID",
+                        "desc": "获取玩家的UUID (可复制到属性命令中使用)",
+                        "enabled": False,
+                        "commands": ["data get entity {player} UUID"],
+                        "params": [
+                            {"key": "player", "label": "玩家ID", "default": ""}
+                        ],
+                    },
+                    {
+                        "name": "设置移速",
+                        "desc": "快速设置玩家基础移动速度",
+                        "enabled": False,
+                        "commands": [
+                            "/attribute {player} minecraft:generic.movement_speed base set {speed}"
+                        ],
+                        "params": [
+                            {"key": "player", "label": "玩家ID", "default": ""},
+                            {"key": "speed", "label": "速度值 (默认0.1)", "default": "0.1"},
+                        ],
+                    },
+                    {
+                        "name": "睡觉比例",
+                        "desc": "设置跳过夜晚所需的睡觉玩家百分比",
+                        "enabled": False,
+                        "commands": ["/gamerule playersSleepingPercentage {ratio}"],
+                        "params": [
+                            {"key": "ratio", "label": "比例 (1-100)", "default": "50"}
+                        ],
+                    },
+                ]
+                self._save_cmd_tpls_init()
+            logger.info(f"[mrcon] 已加载 {len(self.cmd_templates)} 个命令模板")
+        except Exception as e:
+            logger.warning(f"[mrcon] 命令模板加载失败: {e}")
+            self.cmd_templates = []
+
+        # 读取玩家上线触发器（首次自动创建示例）
+        self.online_triggers_path = os.path.join(self.plugin_data_dir, "online_triggers.json")
+        try:
+            if os.path.exists(self.online_triggers_path):
+                with open(self.online_triggers_path, "r", encoding="utf-8") as f:
+                    self.online_triggers = json.load(f)
+                    if not isinstance(self.online_triggers, list):
+                        self.online_triggers = []
+            if not self.online_triggers:
+                self.online_triggers = [
+                    {
+                        "name": "自动设置移速",
+                        "enabled": False,
+                        "player": "",
+                        "match_type": "exact",
+                        "commands": [
+                            "/attribute {player} minecraft:generic.movement_speed base set {speed}"
+                        ],
+                        "cooldown_seconds": 300,
+                        "note": "玩家上线时自动设置移动速度 (填写玩家名后启用)",
+                    },
+                    {
+                        "name": "上线欢迎",
+                        "enabled": False,
+                        "player": "",
+                        "match_type": "exact",
+                        "commands": [
+                            "/tellraw {player} {\"text\":\"欢迎回来! 今日在线奖励已发放\"}"
+                        ],
+                        "cooldown_seconds": 3600,
+                        "note": "玩家上线时发送欢迎消息",
+                    },
+                ]
+                self._save_online_triggers()
+            logger.info(f"[mrcon] 已加载 {len(self.online_triggers)} 个上线触发器")
+        except Exception as e:
+            logger.warning(f"[mrcon] 上线触发器加载失败: {e}")
+            self.online_triggers = []
+
+        # 读取脚本启停设置
+        self.script_settings_path = os.path.join(self.plugin_data_dir, "script_settings.json")
+        self.script_settings = {}  # {filename: {"enabled": bool}}
+        try:
+            if os.path.exists(self.script_settings_path):
+                with open(self.script_settings_path, "r", encoding="utf-8") as f:
+                    self.script_settings = json.load(f)
+                    if not isinstance(self.script_settings, dict):
+                        self.script_settings = {}
+            logger.info(f"[mrcon] 已加载脚本启停设置 ({len(self.script_settings)} 项)")
+        except Exception as e:
+            logger.warning(f"[mrcon] 脚本启停设置加载失败: {e}")
+            self.script_settings = {}
+
+        # 读取快捷命令启停设置
+        self.quick_cmd_settings_path = os.path.join(self.plugin_data_dir, "quick_cmd_settings.json")
+        self.quick_cmd_settings = {}  # {cmd_text: {"enabled": bool}}
+        try:
+            if os.path.exists(self.quick_cmd_settings_path):
+                with open(self.quick_cmd_settings_path, "r", encoding="utf-8") as f:
+                    self.quick_cmd_settings = json.load(f)
+                    if not isinstance(self.quick_cmd_settings, dict):
+                        self.quick_cmd_settings = {}
+            logger.info(f"[mrcon] 已加载快捷命令启停设置 ({len(self.quick_cmd_settings)} 项)")
+        except Exception as e:
+            logger.warning(f"[mrcon] 快捷命令启停设置加载失败: {e}")
+            self.quick_cmd_settings = {}
 
         servers_raw = self.config.get("servers", [])
         if isinstance(servers_raw, list):
@@ -182,13 +387,27 @@ class MrconPlugin(Star):
         if not isinstance(servers, list):
             servers = []
         for i, srv in enumerate(servers, start=1):
+            # 新格式：纯字符串 = 未绑定的服务器名称
+            if isinstance(srv, str):
+                name = srv.strip()
+                if name:
+                    self.named_server_pool.append(name)
+                    logger.info(f"[mrcon] 未绑定服务器名称: {name}")
+                continue
+            # 旧格式：dict = 完整服务器配置（含 group_id）
             if not isinstance(srv, dict):
-                srv = {}
+                continue
             gid = str(srv.get("group_id", "") or "").strip()
-            name = str(srv.get("name", "") or "").strip()
-            host = srv.get("rcon_host")
-            port = srv.get("rcon_port")
-            password = srv.get("rcon_password")
+            name = str(srv.get("name", "") or srv.get("server_name", "") or "").strip()
+            # 跳过无效条目
+            if not gid or not name:
+                if gid:
+                    self.partial_map[gid] = {"missing": ["缺少 group_id 或 name"], "slot": f"服务器 #{i}"}
+                continue
+
+            host = srv.get("rcon_host", "") or ""
+            port = srv.get("rcon_port", 25575)
+            password = srv.get("rcon_password", "") or ""
             game_port = str(srv.get("game_port", "25565") or "25565")
             wl = srv.get("whitelist_qqs", [])
             publics = srv.get("public_commands", [])
@@ -204,26 +423,15 @@ class MrconPlugin(Star):
                 wl = []
             if not isinstance(publics, list):
                 publics = []
-            missing = []
-            if not gid:
-                missing.append("群 ID")
-            if not name:
-                missing.append("服务器名称")
-            if not host:
-                missing.append("地址")
-            if port is None:
-                missing.append("端口")
-            if not password:
-                missing.append("密码")
-            if missing and gid:
-                self.partial_map[gid] = {"missing": missing, "slot": f"服务器 #{i}"}
-            if missing:
-                continue
+
             try:
                 port = int(port)
                 game_port_int = int(game_port)
             except Exception:
-                continue
+                port = 25575
+                game_port_int = 25565
+
+            web_mgmt = bool(srv.get("web_management_enabled", True))
             conf = {
                 "rcon_host": host,
                 "rcon_port": port,
@@ -239,20 +447,63 @@ class MrconPlugin(Star):
                 "admin_decide_ttl": admin_decide_ttl,
                 "relay_enabled": relay_ena,
                 "query_enabled": query_ena,
+                "web_management_enabled": web_mgmt,
                 "slot_index": i,
                 "server_name": name,
                 "display_name": name,
             }
+            logger.info(
+                f"[mrcon] 加载服务器 gid={gid} name={name} "
+                f"host={host} port={port} web_mgmt={web_mgmt}"
+            )
             self.group_map[gid] = conf
             arr = self.group_servers.get(gid) or []
             arr.append(conf)
             self.group_servers[gid] = arr
+
+        # 启动摘要：列出所有群及其服务器的 web_management_enabled 状态
+        total_servers = sum(len(srvs) for srvs in self.group_servers.values())
+        logger.info(
+            f"[mrcon] 服务器加载完成: {len(self.group_servers)} 个群, "
+            f"{total_servers} 台已绑定服务器, "
+            f"{len(self.named_server_pool)} 个未绑定名称"
+        )
+        if self.named_server_pool:
+            logger.info(f"[mrcon] 未绑定服务器名称: {self.named_server_pool}")
+        for gid, srvs in self.group_servers.items():
+            for s in srvs:
+                logger.info(
+                    f"[mrcon]   gid={gid} name={s.get('server_name','?')} "
+                    f"web_mgmt={s.get('web_management_enabled')} "
+                    f"host={s.get('rcon_host','?')}"
+                )
+
+        # 兼容旧版 string 格式 config，转换为 list 格式
+        if isinstance(servers_raw, str) and servers_raw.strip():
+            try:
+                self.config["servers"] = servers  # servers 已通过 json.loads 解析为 list
+                self.config.save_config()
+                logger.info("[mrcon] 已将 servers 配置从 string 格式迁移到 list 格式")
+            except Exception as e:
+                logger.warning(f"[mrcon] servers 配置格式迁移失败: {e}")
 
         self.mcserv_path = os.path.join(self.plugin_data_dir, "mc_servers.json")
         self.player_db_path = os.path.join(self.plugin_data_dir, "player_db.json")
         self.online_sessions_path = os.path.join(self.plugin_data_dir, "online_sessions.json")
         self.db_path = os.path.join(self.plugin_data_dir, "mrcon.db")
         self.db = Database(self.db_path)
+        self.db.set_storage_mode(self.online_db_storage_mode, self.online_db_read_source)
+        # 配置外部数据库
+        if self.online_db_storage_mode in ("external", "dual") and self.online_db_ext_path:
+            self.db.configure_external(
+                ext_type=self.online_db_ext_type,
+                host=self.online_db_ext_host,
+                port=self.online_db_ext_port,
+                user=self.online_db_ext_user,
+                password=self.online_db_ext_password,
+                database=self.online_db_ext_database,
+                ext_db_path=self.online_db_ext_path,
+            )
         self.db.migrate_from_json(self.player_db_path, self.online_sessions_path)
         self._online_cache = {}
         self._last_online_refresh = 0
@@ -266,6 +517,23 @@ class MrconPlugin(Star):
             pass
         if self.tracker_enabled:
             self._tracker_task = asyncio.create_task(self._online_tracker_loop())
+        # 从数据库恢复在线状态
+        try:
+            state_rows = self.db.load_online_state()
+            for row in state_rows:
+                sn = row.get("server_name", "")
+                pn = row.get("player_name", "")
+                gid = str(row.get("gid", ""))
+                la = row.get("login_at", 0)
+                if sn and pn:
+                    sid = f"{sn}:{pn}"
+                    self._online_cache[sid] = {
+                        "login_at": la, "player": pn, "server": sn,
+                        "gid": gid, "notified": set(), "kicked": False,
+                    }
+            logger.info(f"[mrcon] 从数据库恢复了 {len(state_rows)} 条在线状态")
+        except Exception as e:
+            logger.warning(f"[mrcon] 加载在线状态失败: {e}")
         # 启动 Web 管理面板
         if self.web_panel_enabled:
             try:
@@ -652,6 +920,86 @@ class MrconPlugin(Star):
     def _save_mcserv(self, data: dict):
         safe_json_write(self.mcserv_path, data)
 
+    def _save_cmd_tpls_init(self):
+        """首次初始化命令模板文件"""
+        try:
+            tp = self.cmd_templates_path
+            os.makedirs(os.path.dirname(tp), exist_ok=True)
+            with open(tp, "w", encoding="utf-8") as f:
+                json.dump(self.cmd_templates, f, ensure_ascii=False, indent=2)
+            logger.info("[mrcon] 已创建示例命令模板文件")
+        except Exception as e:
+            logger.warning(f"[mrcon] 命令模板文件创建失败: {e}")
+
+    def _save_online_triggers(self):
+        """保存上线触发器"""
+        try:
+            tp = self.online_triggers_path
+            os.makedirs(os.path.dirname(tp), exist_ok=True)
+            with open(tp, "w", encoding="utf-8") as f:
+                json.dump(self.online_triggers, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[mrcon] 保存上线触发器失败: {e}")
+
+    def _save_script_settings(self):
+        """保存脚本启停设置"""
+        try:
+            sp = self.script_settings_path
+            os.makedirs(os.path.dirname(sp), exist_ok=True)
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(self.script_settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[mrcon] 保存脚本启停设置失败: {e}")
+
+    def _save_quick_cmd_settings(self):
+        """保存快捷命令启停设置"""
+        try:
+            sp = self.quick_cmd_settings_path
+            os.makedirs(os.path.dirname(sp), exist_ok=True)
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(self.quick_cmd_settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[mrcon] 保存快捷命令启停设置失败: {e}")
+
+    async def _check_online_triggers(self, player: str, srv_name: str, gid: str, conf: dict, now: int):
+        for t in self.online_triggers:
+            if not t.get("enabled"):
+                continue
+            tplayer = str(t.get("player", "")).strip()
+            if not tplayer:
+                continue
+            match_type = t.get("match_type", "exact")
+            if match_type == "exact":
+                if player.lower() != tplayer.lower():
+                    continue
+            elif match_type == "contains":
+                if tplayer.lower() not in player.lower():
+                    continue
+            else:
+                continue
+            # 检查冷却
+            cd_sec = int(t.get("cooldown_seconds", 0))
+            if cd_sec > 0:
+                cd_map = self._trigger_cooldowns.setdefault(t["name"], {})
+                last = cd_map.get(player, 0)
+                if now - last < cd_sec:
+                    continue
+                cd_map[player] = now
+            # 执行命令
+            cmds = t.get("commands", [])
+            if not isinstance(cmds, list):
+                cmds = [str(cmds)]
+            for cmd in cmds:
+                cmd = str(cmd).replace("{player}", player).replace("{PLAYER}", player)
+                try:
+                    resp = await rcon_command(
+                        conf["rcon_host"], int(conf["rcon_port"]),
+                        conf["rcon_password"], cmd,
+                    )
+                    logger.info(f"[mrcon] 触发器 [{t['name']}] 执行: {cmd} -> {resp[:80]}")
+                except Exception as e:
+                    logger.warning(f"[mrcon] 触发器 [{t['name']}] 失败: {cmd} -> {e}")
+
     def _get_group_serv_data(self, group_id: str) -> dict:
         """读取指定群的 MC 服务器数据文件"""
         gpath = os.path.join(self.plugin_data_dir, f"mcserv_{group_id}.json")
@@ -779,6 +1127,12 @@ class MrconPlugin(Star):
                                 "login_at": now, "player": player, "server": srv_name,
                                 "gid": gid, "notified": set(), "kicked": False,
                             }
+                            try:
+                                self.db.save_online_state(srv_name, player, str(gid), now)
+                            except Exception:
+                                pass
+                            # 检查上线触发器
+                            await self._check_online_triggers(player, srv_name, str(gid), conf, now)
                         cache = self._online_cache[sid]
                         session_mins = (now - cache["login_at"]) // 60
                         # 通知检查（群内 + 游戏内）
@@ -837,6 +1191,10 @@ class MrconPlugin(Star):
                         s = self._online_cache[sid]
                         if s["server"] == srv_name and s["player"] not in online:
                             self.db.add_online_session(srv_name, s["player"], s["login_at"], now)
+                            try:
+                                self.db.remove_online_state(srv_name, s["player"])
+                            except Exception:
+                                pass
                             del self._online_cache[sid]
                 # 定时重置在线时长排行
                 if self.ranking_reset_hours > 0:
@@ -1351,26 +1709,54 @@ class MrconPlugin(Star):
     # 玩家数据库命令
     # ==============================================================
     @filter.command("绑定", desc="绑定MC账号（新玩家注册）", alias={"bind"})
-    async def cmd_bind(self, event: AstrMessageEvent, mc_id: str = ""):
+    async def cmd_bind(self, event: AstrMessageEvent, mc_id: str = "", rest: str = ""):
         if not self.pdb_enabled:
             yield event.plain_result("玩家数据库功能未开启")
             return
+        sender_qq = str(event.get_sender_id())
+        is_global_admin = self.is_admin(sender_qq)
+        gid = self._get_group_id(event)
+        is_group_admin = False
+        if gid and gid in self.group_servers:
+            for srv in self.group_servers[gid]:
+                wl = [str(x) for x in srv.get("whitelist_qqs", [])]
+                if sender_qq in wl:
+                    is_group_admin = True
+                    break
+
+        if rest.strip():
+            # 管理员模式: /绑定 <目标QQ> <MC_ID>
+            if not is_global_admin and not is_group_admin:
+                yield event.plain_result("❌ 你没有管理员权限，不能帮别人绑定。用法: /绑定 <你的MC ID>")
+                return
+            target_qq = mc_id.strip()
+            target_mc = rest.strip()
+            if not target_qq.isdigit():
+                yield event.plain_result("❌ QQ号必须是纯数字\n用法: /绑定 <QQ号> <MC ID>")
+                return
+            if not is_global_admin:
+                if not gid:
+                    yield event.plain_result("❌ 仅在群聊中可使用管理员绑定功能")
+                    return
+            result = self.db.bind_player(target_qq, target_mc, self.pdb_new_pts)
+            if result.get("already_bound"):
+                yield event.plain_result(f"❌ 该QQ已绑定 MC 账号 {result['old_mc_id']}，不能重复绑定")
+                return
+            yield event.plain_result(f"✅ 已为 QQ {target_qq} 绑定 MC 账号: {target_mc}\n🎁 获得新玩家奖励 {self.pdb_new_pts} 积分！\n💰 总积分: {result['total_pts']}")
+            return
+
+        # 普通模式: /绑定 <MC_ID>
         if not mc_id:
-            yield event.plain_result("用法: /bind <你的MC ID>")
+            hint = "用法: /绑定 <你的MC ID>"
+            if is_global_admin or is_group_admin:
+                hint += "\n管理员用法: /绑定 <QQ号> <MC ID>"
+            yield event.plain_result(hint)
             return
-        qq_id = str(event.get_sender_id())
-        p = self._ensure_player(qq_id)
-        if p.get("mc_id"):
-            yield event.plain_result(f"你已绑定 {p['mc_id']}，不能重复绑定")
+        result = self.db.bind_player(sender_qq, mc_id, self.pdb_new_pts)
+        if result.get("already_bound"):
+            yield event.plain_result(f"❌ 你已绑定 {result['old_mc_id']}，不能重复绑定")
             return
-        now = int(time.time())
-        self._update_player(qq_id, {
-            "mc_id": mc_id,
-            "first_login": now,
-            "last_login": now,
-            "points": self.pdb_new_pts,
-        })
-        yield event.plain_result(f"✅ 已绑定 MC 账号: {mc_id}\n🎁 获得新玩家奖励 {self.pdb_new_pts} 积分！")
+        yield event.plain_result(f"✅ 已绑定 MC 账号: {mc_id}\n🎁 获得新玩家奖励 {self.pdb_new_pts} 积分！\n💰 总积分: {result['total_pts']}")
 
     @filter.command("签到", desc="每日签到（需先绑定MC账号）", alias={"checkin"})
     async def cmd_checkin(self, event: AstrMessageEvent):
@@ -1378,33 +1764,18 @@ class MrconPlugin(Star):
             yield event.plain_result("玩家数据库功能未开启")
             return
         qq_id = str(event.get_sender_id())
-        p = self._ensure_player(qq_id)
-        if not p.get("mc_id"):
+        today = time.strftime("%Y-%m-%d")
+        result = self.db.checkin_player(qq_id, today, self.pdb_checkin_pts, self.pdb_streak_bonus)
+        if not result.get("mc_id"):
             yield event.plain_result("请先用 /绑定 绑定 MC 账号再签到")
             return
-        today = time.strftime("%Y-%m-%d")
-        last = p.get("last_checkin_date", "")
-        if last == today:
+        if result.get("already_checked"):
             yield event.plain_result("你今天已经签到过了！")
             return
-        streak = p.get("checkin_streak", 0)
-        if last:
-            last_dt = time.strptime(last, "%Y-%m-%d")
-            today_dt = time.strptime(today, "%Y-%m-%d")
-            diff = (time.mktime(today_dt) - time.mktime(last_dt)) / 86400
-            if diff <= 1:
-                streak += 1
-            else:
-                streak = 1
-        else:
-            streak = 1
-        pts = self.pdb_checkin_pts + (streak - 1) * self.pdb_streak_bonus
-        self._update_player(qq_id, {
-            "checkin_streak": streak,
-            "last_checkin_date": today,
-            "points": p.get("points", 0) + pts,
-        })
-        yield event.plain_result(f"✅ 签到成功！连续签到 {streak} 天\n💰 +{pts} 积分 | 总积分: {p.get('points', 0) + pts}")
+        yield event.plain_result(
+            f"✅ 签到成功！连续签到 {result['streak']} 天\n"
+            f"💰 +{result['gained_pts']} 积分 | 总积分: {result['total_pts']}"
+        )
 
     @filter.command("我的", desc="查看个人统计", alias={"mystats"})
     async def cmd_mystats(self, event: AstrMessageEvent):
@@ -1536,6 +1907,190 @@ class MrconPlugin(Star):
             return
         self.db.update_compensation(cid, "rejected")
         yield event.plain_result(f"❌ 已拒绝补偿申请 #{cid}")
+
+    # ==============================================================
+    # 积分兑换
+    # ==============================================================
+
+    @filter.command("兑换列表", desc="查看可用兑换项", alias={"shop", "exlist"})
+    async def cmd_exchange_list(self, event: AstrMessageEvent):
+        if not self.pdb_enabled:
+            yield event.plain_result("玩家数据库功能未开启")
+            return
+        gid = self._get_group_id(event) or ""
+        items = self.db.get_exchange_items(gid)
+        if not items:
+            yield event.plain_result("当前群暂无可用兑换项")
+            return
+        lines = ["📦 可用兑换项:"]
+        for it in items:
+            status = "✅" if it.get("enabled") else "⛔"
+            lines.append(f"{status} #{it['id']} {it['name']} — {it['cost_points']}积分")
+            if it.get("description"):
+                lines.append(f"   {it['description']}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("兑换", desc="使用积分兑换物品", alias={"redeem", "ex", "buy"})
+    async def cmd_exchange(self, event: AstrMessageEvent, item_id: str = ""):
+        if not self.pdb_enabled:
+            yield event.plain_result("玩家数据库功能未开启")
+            return
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("仅在群聊中可使用兑换功能")
+            return
+        try:
+            iid = int(item_id)
+        except ValueError:
+            yield event.plain_result("用法: /兑换 <编号>\n先用 /兑换列表 查看可用项目")
+            return
+        qq_id = str(event.get_sender_id())
+        p = self.db.get_player(qq_id)
+        if not p or not p.get("mc_id"):
+            yield event.plain_result("请先用 /绑定 绑定 MC 账号")
+            return
+        # 检查兑换项属于当前群
+        item = self.db.get_exchange_item(iid)
+        if not item or str(item.get("group_id", "")) != gid:
+            yield event.plain_result("❌ 兑换项不属于当前群")
+            return
+        result = self.db.redeem_exchange(qq_id, p["mc_id"], iid)
+        if not result["success"]:
+            yield event.plain_result(f"❌ {result['error_msg']}")
+            return
+        # 执行 RCON 命令
+        conf = self.group_map.get(gid)
+        if not conf:
+            yield event.plain_result(
+                f"✅ 已兑换 {result['item_name']}，消耗 {result['cost']} 积分\n"
+                f"💰 剩余积分: {result['total_pts']}\n"
+                f"⚠️ 当前群未配置服务器，RCON命令手动执行: {result['rcon_cmd']}"
+            )
+            return
+        try:
+            async for msg in self._execute_on_conf(event, conf, result['rcon_cmd'],
+                                                     f"兑换#{iid} {result['item_name']}"):
+                yield msg
+            yield event.plain_result(
+                f"✅ 兑换成功: {result['item_name']}\n"
+                f"💰 消耗 {result['cost']} 积分 | 剩余: {result['total_pts']}"
+            )
+        except Exception:
+            yield event.plain_result(
+                f"✅ 已兑换 {result['item_name']}，消耗 {result['cost']} 积分\n"
+                f"💰 剩余积分: {result['total_pts']}\n"
+                f"⚠️ RCON执行异常，命令: {result['rcon_cmd']}"
+            )
+
+    # ==============================================================
+    # 抽奖
+    # ==============================================================
+
+    @filter.command("抽奖", desc="消耗积分抽取奖品", alias={"lottery", "draw"})
+    async def cmd_lottery(self, event: AstrMessageEvent):
+        if not self.pdb_enabled:
+            yield event.plain_result("玩家数据库功能未开启")
+            return
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("仅在群聊中可使用抽奖功能")
+            return
+        qq_id = str(event.get_sender_id())
+        p = self.db.get_player(qq_id)
+        if not p or not p.get("mc_id"):
+            yield event.plain_result("请先用 /绑定 绑定 MC 账号")
+            return
+        result = self.db.draw_lottery(qq_id, p["mc_id"], gid)
+        if not result["success"]:
+            yield event.plain_result(f"❌ {result['error_msg']}")
+            return
+        if not result["results"]:
+            yield event.plain_result(
+                f"🎰 很遗憾，未中奖！消耗 {result['cost']} 积分\n💰 剩余积分: {result['total_pts']}"
+            )
+            return
+        lines = ["🎉 恭喜中奖！"]
+        for r in result["results"]:
+            lines.append(f"🏆 {r['prize_name']} (兑奖编号 #{r['win_id']})")
+        lines.append(f"💰 消耗 {result['cost']} 积分 | 剩余: {result['total_pts']}")
+        lines.append("使用 /兑奖 <编号> 兑换奖品")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("奖品列表", desc="查看当前群可抽取的奖品", alias={"prizes", "jp"})
+    async def cmd_lottery_prizes(self, event: AstrMessageEvent):
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("仅在群聊中使用")
+            return
+        prizes = self.db.get_lottery_prizes(gid)
+        if not prizes:
+            yield event.plain_result("当前群暂未配置奖品")
+            return
+        lines = ["🎁 可抽取奖品:"]
+        for p in prizes:
+            prob = f"{p['probability']*100:.0f}%"
+            cost = f" ({p['cost_points']}积分/次)" if p.get("cost_points") else ""
+            lines.append(f"🏆 {p['name']} — 概率 {prob}{cost}")
+            if p.get("description"):
+                lines.append(f"   {p['description']}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("兑奖", desc="兑换中奖奖品", alias={"redeem_prize", "claim"})
+    async def cmd_lottery_redeem(self, event: AstrMessageEvent, win_id: str = ""):
+        if not self.pdb_enabled:
+            yield event.plain_result("玩家数据库功能未开启")
+            return
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("仅在群聊中使用")
+            return
+        try:
+            wid = int(win_id)
+        except ValueError:
+            yield event.plain_result("用法: /兑奖 <中奖编号>\n用 /我的中奖 查看中奖记录")
+            return
+        result = self.db.redeem_lottery_win(wid)
+        if not result["success"]:
+            yield event.plain_result(f"❌ {result['error_msg']}")
+            return
+        # 执行RCON
+        conf = self.group_map.get(gid)
+        if conf:
+            try:
+                async for msg in self._execute_on_conf(event, conf, result['prize_cmd'],
+                                                         f"兑奖#{wid} {result['prize_name']}"):
+                    yield msg
+            except Exception:
+                yield event.plain_result(
+                    f"✅ 已兑 {result['prize_name']}\n⚠️ RCON执行异常，命令: {result['prize_cmd']}"
+                )
+                return
+            yield event.plain_result(f"✅ 兑奖成功: {result['prize_name']}")
+        else:
+            yield event.plain_result(
+                f"✅ 已兑 {result['prize_name']}\n"
+                f"⚠️ 当前群未配置服务器，命令: {result['prize_cmd']}"
+            )
+
+    @filter.command("我的中奖", desc="查看我的中奖记录", alias={"mywins", "wins"})
+    async def cmd_lottery_my_wins(self, event: AstrMessageEvent):
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("仅在群聊中使用")
+            return
+        qq_id = str(event.get_sender_id())
+        wins = self.db.get_lottery_wins(qq_id=qq_id, group_id=gid)
+        if not wins:
+            yield event.plain_result("你还没有中奖记录\n用 /抽奖 试试手气！")
+            return
+        lines = ["🎖️ 你的中奖记录:"]
+        for w in wins[:10]:
+            status = "✅ 已兑" if w["redeemed"] else "⏳ 待兑换"
+            ts = time.strftime("%m/%d %H:%M", time.localtime(w["win_time"])) if w.get("win_time") else "-"
+            lines.append(f"#{w['id']} {w['prize_name']} ({ts}) {status}")
+        if len(wins) > 10:
+            lines.append(f"...共 {len(wins)} 条记录")
+        yield event.plain_result("\n".join(lines))
 
     # ==============================================================
     # 群服消息互联
@@ -2141,10 +2696,14 @@ class MrconPlugin(Star):
         if not name:
             yield event.plain_result(f"你好, {named}, 请输入宏名称。")
             return
-        cmds = self.macros.get(name)
-        if not cmds:
+        mc = self.macros.get(name)
+        if not mc:
             yield event.plain_result("未找到该宏定义")
             return
+        if not mc.get("enabled", True):
+            yield event.plain_result(f"宏「{name}」已被禁用")
+            return
+        cmds = mc["commands"]
         parts = [p for p in str(args).split() if p]
         key = self._rate_key(event)
         lock = self._acquire_lock(key)
@@ -2171,6 +2730,11 @@ class MrconPlugin(Star):
             yield event.plain_result(f"你好, {named}, 请输入脚本文件名。")
             return
         path = os.path.join(self.scripts_dir, filename)
+        # 检查启用状态（默认启用，除非明确禁用）
+        ss = self.script_settings.get(filename, {})
+        if not ss.get("enabled", True):
+            yield event.plain_result(f"脚本「{filename}」已被禁用")
+            return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f.readlines()]
@@ -2200,68 +2764,156 @@ class MrconPlugin(Star):
     # ==============================================================
     # 帮助
     # ==============================================================
-    @filter.command("rchelp", desc="查看所有可用命令", alias={"rc帮助", "帮助", "help", "mchelp"})
+    @filter.command("rchelp", desc="查看所有可用命令（图片版）", alias={"rc帮助", "帮助", "help", "mchelp"})
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result(
-            "━━━ MRCon 命令帮助 ━━━\n"
-            "\n"
-            "▎🖥️ MC 服务器查询\n"
-            "  /mc                 查询所有绑定服务器状态（含在线玩家）\n"
-            "  /mcget <名称>       查看单服详情 （别名：/服详情）\n"
-            "  /mclist             列出本群已配置的服务器\n"
-            "  /mcset <项名> <0|1>  设置查询显示项（管理员）\n"
-            "  /在线时长 [服|玩家]   在线时长排行，默认本群（别名：/onlinetime）\n"
-            "  /在线提醒            查看/配置本群在线提醒与踢出（管理员）\n"
-            "\n"
-            "▎⚙️ 服务器管理（管理员）\n"
-            "  /mcadd <名称> <地址>   添加服务器\n"
-            "  /mcdel <名称>          删除服务器\n"
-            "  /mcup <名称> [新名] [地址]  更新服务器 （别名：/改服）\n"
-            "  /mcshare <名称> <群号>  共享服务器到其他群\n"
-            "  /mcunshare <名称> <群号> 取消共享\n"
-            "  /mccleanup              清理失效服务器\n"
-            "\n"
-            "▎🎯 RCON 远程命令\n"
-            "  /mrcon <命令>        发送RCON命令到服务器（别名：/执行 /mcmd）\n"
-            "  /选服 <编号>          选择当前RCON目标服务器\n"
-            "  /宏 <名称> [参数]      执行预设宏命令\n"
-            "  /脚本 <文件名>         执行脚本文件\n"
-            "  /rc赞同 | /rc反对 | /rc通过 | /rc否决  投票裁决\n"
-            "\n"
-            "▎👤 玩家功能\n"
-            "  /绑定 <MC_ID>         绑定MC账号 / 新玩家注册\n"
-            "  /签到                 每日签到获取积分\n"
-            "  /我的                 查看个人积分与统计\n"
-            "  /理赔 <RCON命令>       申请物品补偿 （别名：/赔）\n"
-            "                        开=全局可用 | 关=仅白名单可用\n"
-            "  /理赔列表             查看待处理申请（管理员）\n"
-            "  /同意理赔 <ID>         批准并执行（管理员）\n"
-            "  /拒绝理赔 <ID>         拒绝申请（管理员）\n"
-            "\n"
-            "▎🔗 群服消息互联\n"
-            "  /msay <消息>          主动发送消息到MC公屏 （别名：/群说 /服说）\n"
-            "  /消息互通             查看本群消息互通状态与配置\n"
-            "  /消息互通 开|关        开关本群消息互通（开=独立配置，关=不互通）\n"
-            "  /消息互通 模式 <off|global|custom>  设置模式（不互通/遵循全局/独立）\n"
-            "  /消息互通 群到服 <开|关>   独立配置群→服转发\n"
-            "  /消息互通 服到群 <开|关>   独立配置服→群转发\n"
-            "  /消息互通 仅msay <开|关>    仅允许 /msay 命令互通（不自动转发）\n"
-            "  /消息互通 格式 <文本>      自定义转发格式（{name}/{msg}）\n"
-            "  /消息互通 服 <名称>        指定目标服务器\n"
-            "  /消息互通 重置             恢复默认（模式=off，不互通）\n"
-            "  ⚠ 服→群转发需 MC 配套模组（开发中），群→服已可用\n"
-            "  模组发布后从 GitHub 下载安装到 MC 服即可，详见 README\n"
-            "\n"
-            "▎🌐 Web 管理面板  v3.11.1\n"
-            "  浏览器访问 http://localhost:9949 图形化管理所有配置\n"
-            "  （基于原生 asyncio TCP，零外部依赖，15 个功能模块）\n"
-            "  • 📊 仪表盘总览（卡片点击跳转）   • 🖥️ 服务器增删改查 + 投票\n"
-            "  • 🔗 群服互联（自动绑定 + 多服绑定 + 独立开关）\n"
-            "  • 📡 在线追踪配置         • 👥 玩家数据管理 + 导入\n"
-            "  • 📋 补偿审批管理         • 🟢 在线列表 + 时段图表 + 排行\n"
-            "  • ⚡ 快捷命令（预设/FTB）  • 📜 审计日志（自动刷新）\n"
-            "  • ⚙️ 全局设置（双列卡片）  • 🔧 高级（白名单/公开/共享）\n"
-            "  配置项 web_panel.enabled = true 启动\n"
-            "\n"
-            "━━━ 输入 /rchelp 随时查看此帮助 ━━━"
-        )
+        if not _HAS_PIL:
+            yield event.plain_result(
+                "━━━ MRCon 命令帮助 ━━━\n\n"
+                "🖥️ MC查询: /mc /mcget /mclist /mcset /在线时长 /在线提醒\n"
+                "⚙️ 服务器管理: /mcadd /mcdel /mcup /mcshare /mcunshare /mccleanup\n"
+                "🎯 RCON: /mrcon /选服 /宏 /脚本 /rc赞同 /rc反对\n"
+                "👤 玩家: /绑定 /签到 /我的 /理赔 /理赔列表\n"
+                "💱 积分: /兑换列表 /兑换\n"
+                "🎰 抽奖: /抽奖 /奖品列表 /兑奖 /我的中奖\n"
+                "🔗 互联: /msay /消息互通\n"
+                "🌐 Web面板: http://localhost:9949\n\n"
+                "━━━ 详细帮助请升级 Pillow 后查看 ━━━\n"
+                "pip install Pillow"
+            )
+            return
+        img_bytes = self._render_help_image()
+        path = os.path.join(self.plugin_data_dir, "_tmp_help.png")
+        with open(path, "wb") as f:
+            f.write(img_bytes.read())
+        try:
+            from astrbot.api.message_components import Image as ImgComp, Plain as PlComp
+            yield event.chain_result(MessageChain([ImgComp.fromFileSystem(path)]))
+        except Exception:
+            try:
+                yield event.image_result(path)
+            except Exception:
+                yield event.plain_result("帮助图片已生成: " + path)
+
+    def _render_help_image(self) -> BytesIO:
+        # 字体检测
+        font_paths = [
+            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),
+            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simhei.ttf"),
+            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simsun.ttc"),
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+        font_path = None
+        for fp in font_paths:
+            if os.path.exists(fp):
+                font_path = fp
+                break
+        # 颜色 / 尺寸
+        BG = "#181825"       # 深色底
+        FG = "#cdd6f4"       # 正文
+        HL = "#89b4fa"       # 标题蓝
+        AC = "#a6e3a1"       # 命令绿
+        SUB = "#6c7086"      # 副标题灰
+        DIV = "#45475a"      # 分隔线色
+        W = 820
+        PAD_X, PAD_Y = 24, 18
+        LINE_H = 26
+        HEAD_H = 38
+        # 字体
+        try:
+            font = ImageFont.truetype(font_path or "", 16) if font_path else ImageFont.load_default()
+            font_sm = ImageFont.truetype(font_path or "", 13) if font_path else ImageFont.load_default()
+            font_hd = ImageFont.truetype(font_path or "", 20) if font_path else ImageFont.load_default()
+        except Exception:
+            font = font_sm = font_hd = ImageFont.load_default()
+        # 帮助内容 (section_header, [(command, desc)])
+        sections = [
+            ("🖥️ MC 查询", [
+                ("/mc", "所有服务器状态 + 在线玩家"),
+                ("/mcget <名>", "单服详情"),
+                ("/mclist", "服务器列表"),
+                ("/mcset <项> 1|0", "设置显示项"),
+                ("/在线时长 [服|玩家]", "在线排行"),
+                ("/在线提醒", "配置提醒与踢出"),
+            ]),
+            ("⚙️ 服务器", [
+                ("/mcadd <名> <IP:端口>", "添加"),
+                ("/mcdel <名>", "删除"),
+                ("/mcup <名> [新名] [新址]", "更新"),
+                ("/mcshare|mcunshare <名> <群>", "共享 / 取消"),
+                ("/mccleanup", "清理失效服务器"),
+            ]),
+            ("🎯 RCON", [
+                ("/mrcon <命令>", "执行 RCON 命令"),
+                ("/选服 <编号>", "选择目标服务器"),
+                ("/宏 <名> [参数]", "执行预设宏"),
+                ("/脚本 <文件名>", "执行脚本"),
+                ("/rc赞同|反对  /rc通过|否决", "投票 + 裁决"),
+            ]),
+            ("👤 玩家", [
+                ("/绑定 <MC_ID>", "绑定 MC 账号"),
+                ("/签到", "每日签到"),
+                ("/我的", "积分与统计"),
+                ("/理赔 <命令>", "申请物品补偿"),
+                ("/理赔列表 | 同意|拒绝理赔", "审批管理"),
+            ]),
+            ("💱 积分 & 🎰 抽奖", [
+                ("/兑换列表 /兑换 <编号>", "积分兑换"),
+                ("/抽奖 /奖品列表", "积分抽奖"),
+                ("/兑奖 <编号> /我的中奖", "兑奖 / 中奖记录"),
+            ]),
+            ("🔗 群服互联", [
+                ("/msay <消息>", "发消息到 MC 公屏"),
+                ("/消息互通 开|关", "开关互通"),
+                ("/消息互通 模式 off|global|custom", "转发模式"),
+                ("/消息互通 群到服|服到群 开|关", "方向开关"),
+                ("/消息互通 服 <名>", "指定目标服务器"),
+                ("/消息互通 格式 <文本>", "自定义格式 {name}/{msg}"),
+                ("/消息互通 重置", "恢复默认"),
+            ]),
+            ("🌐 Web 面板", [
+                ("http://localhost:9949", "浏览器管理面板"),
+                ("v" + self._get_version(), "自启: web_panel.enabled=true"),
+            ]),
+        ]
+        # 计算高度
+        total_h = PAD_Y * 2  # 上下padding
+        for title, cmds in sections:
+            total_h += HEAD_H + 4
+            total_h += len(cmds) * LINE_H + 10
+        total_h += 30  # footer
+        # 创建图片
+        img = PILImage.new("RGB", (W, total_h), BG)
+        draw = ImageDraw.Draw(img)
+        y = PAD_Y
+        # 标题
+        draw.text((PAD_X, y), "━━━  MRCon 命令帮助  ━━━", fill=HL, font=font_hd)
+        y += HEAD_H + 8
+        draw.line([(PAD_X, y), (W - PAD_X, y)], fill=DIV, width=1)
+        y += 10
+        for title, cmds in sections:
+            draw.text((PAD_X, y), title, fill=HL, font=font)
+            y += HEAD_H
+            for cmd, desc in cmds:
+                cmd_w = draw.textlength(cmd, font=font_sm)
+                draw.text((PAD_X, y + 2), cmd, fill=AC, font=font_sm)
+                draw.text((PAD_X + cmd_w + 14, y + 2), desc, fill=FG, font=font_sm)
+                y += LINE_H
+            y += 6
+            draw.line([(PAD_X, y), (W - PAD_X, y)], fill=DIV, width=1)
+            y += 10
+        draw.text((PAD_X, y), "输入  /rchelp  随时查看此帮助", fill=SUB, font=font_sm)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+
+    def _get_version(self) -> str:
+        try:
+            import yaml
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metadata.yaml")
+            with open(p, "r", encoding="utf-8") as f:
+                m = yaml.safe_load(f)
+                return str(m.get("version", "?"))
+        except Exception:
+            return "?"

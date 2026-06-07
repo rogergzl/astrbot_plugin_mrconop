@@ -76,16 +76,16 @@
     "obvious_hint": true,
     "hint": "定时查询在线玩家，记录在线时长；可配置时长提醒与超时自动踢出",
     "items": {
-      "enabled": { "description": "启用在线时长监控", "type": "bool", "default": false },
+      "enabled": { "description": "启用在线时长监控", "type": "bool", "default": true },
       "poll_interval_seconds": { "description": "轮询间隔（秒）", "type": "int", "hint": "每隔多少秒查询一次在线列表", "default": 60 },
       "query_method": { "description": "查询方式", "type": "string", "options": ["rcon", "mcstatus"], "hint": "rcon=通过RCON list命令, mcstatus=通过MC协议查询", "default": "rcon" },
       "notify_enabled": { "description": "启用在线时长提醒", "type": "bool", "hint": "玩家达到设定时长节点时发送提醒", "default": false },
       "notify_target": { "description": "提醒发送目标", "type": "string", "options": ["group", "admin_dm"], "hint": "group=发到群内, admin_dm=私聊管理员(附带群名)", "default": "group" },
-      "notify_intervals": { "description": "提醒时长节点（分钟）", "type": "list", "items": { "type": "int" }, "hint": "玩家连续在线达到这些时长时提醒，如 [60, 120, 360]", "default": [60, 120, 360] },
+      "notify_intervals": { "description": "提醒时长节点（分钟）", "type": "list", "items": { "type": "int" }, "hint": "玩家连续在线达到这些时长时提醒，如 [480, 360, 240]", "default": [480, 360, 240] },
       "notify_in_game": { "description": "在游戏内同步提醒", "type": "bool", "hint": "通过RCON say命令在游戏公屏提醒玩家", "default": false },
       "notify_game_format": { "description": "游戏内提醒格式", "type": "string", "hint": "{player}=玩家名 {duration}=时长, RCON say命令发送", "default": "§e[在线提醒] {player} 已连续在线 {duration}，注意休息！" },
       "auto_kick_enabled": { "description": "启用超时自动踢出", "type": "bool", "hint": "玩家单次在线超过阈值时自动踢出", "default": false },
-      "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 720 },
+      "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 480 },
       "auto_kick_reason": { "description": "踢出原因文本", "type": "string", "hint": "支持 {player} 占位符替换为玩家名", "default": "你已连续在线过久，请休息一下！" },
       "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 }
     }
@@ -97,7 +97,7 @@
     "hint": "将群聊消息转发到 MC 服务器，或将服务器消息转发到群聊",
     "items": {
       "enabled": { "description": "启用群服消息互联", "type": "bool", "default": false },
-      "group_to_mc": { "description": "群聊消息 → MC", "type": "bool", "hint": "群内非命令消息转发到服务器 chat", "default": true },
+      "group_to_mc": { "description": "群聊消息 → MC", "type": "bool", "hint": "群内非命令消息转发到服务器 chat", "default": false },
       "mc_to_group": { "description": "MC 消息 → 群聊", "type": "bool", "hint": "服务器聊天消息转发到对应群（需 MC 模组）", "default": false },
       "require_msay": { "description": "仅允许 /msay 命令互通", "type": "bool", "hint": "开启后只允许通过 /msay 主动转发，群聊消息不自动转发", "default": false },
       "format_group": { "description": "群→MC 消息格式", "type": "string", "hint": "{name}=群昵称, {msg}=消息内容", "default": "[QQ] {name}: {msg}" },
@@ -106,7 +106,7 @@
     }
   },
   "player_db": {
-    "description": "玩家数据库与签到",
+    "description": "玩家数据库与签到（统一存储配置，在线记录公用）",
     "type": "object",
     "obvious_hint": true,
     "hint": "玩家账号关联、签到、活动奖励、物品补偿等基础设置",
@@ -118,7 +118,33 @@
       "compensation_enabled": { "description": "补偿模式", "type": "bool", "hint": "开 = 全局可用（任何人可申请）；关 = 仅白名单可用", "default": false },
       "compensation_whitelist": { "description": "补偿白名单 QQ 列表", "type": "list", "items": { "type": "string" }, "hint": "compensation_enabled=false 时仅列表中 QQ 可用。与服务器白名单独立", "default": [] },
       "compensation_require_admin": { "description": "补偿需管理员审批", "type": "bool", "default": true },
-      "compensation_blacklist": { "description": "补偿命令黑名单（全词匹配）", "type": "list", "items": { "type": "string" }, "hint": "命令中任一单词完整命中即驳回。例：填入 mingling_fangkuai 则 give @a mingling_fangkuai 被拒", "default": [] }
+      "compensation_blacklist": { "description": "补偿命令黑名单（全词匹配）", "type": "list", "items": { "type": "string" }, "hint": "命令中任一单词完整命中即驳回。例：填入 mingling_fangkuai 则 give @a mingling_fangkuai 被拒", "default": [] },
+      "compensation_cooldown_hours": { "description": "补偿申请冷却时间（小时）", "type": "int", "hint": "同一玩家两次补偿申请最小间隔", "default": 24 },
+      "storage_mode": { "description": "玩家数据存储模式", "type": "string", "options": ["local", "external", "dual"], "hint": "local=仅本地, external=仅云端, dual=双端同时存储", "default": "local" },
+      "read_source": { "description": "玩家数据读取来源", "type": "string", "options": ["local", "external"], "hint": "只能选择本地或云端，不可双读防止冲突", "default": "local" },
+      "external_db_path": { "description": "外部 SQLite 数据库路径", "type": "string", "hint": "仅在 external 模式下生效，如 D:/shared/players.db", "default": "" },
+      "external_host": { "description": "外部数据库主机", "type": "string", "hint": "MySQL/PostgreSQL 主机地址", "default": "" },
+      "external_port": { "description": "外部数据库端口", "type": "int", "hint": "MySQL=3306, PostgreSQL=5432", "default": 3306 },
+      "external_user": { "description": "外部数据库用户名", "type": "string", "default": "" },
+      "external_password": { "description": "外部数据库密码", "type": "string", "default": "" },
+      "external_database": { "description": "外部数据库名", "type": "string", "default": "" }
+    }
+  },
+  "online_db": {
+    "description": "在线数据存储（兼容旧配置，新配置请使用 player_db 统一存储）",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "控制在线玩家数据的存储位置。可单独使用本地数据库、外部联网数据库或双数据库同时存储。外部数据库用于跨实例数据共享（如 MySQL/PostgreSQL 远程服务器）",
+    "items": {
+      "storage_mode": { "description": "存储模式", "type": "string", "options": ["local", "external", "dual"], "hint": "local=仅本地, external=仅云端, dual=双端同时存储", "default": "local" },
+      "read_source": { "description": "读取来源", "type": "string", "options": ["local", "external"], "hint": "从哪个数据库读取在线数据（Web面板、排行等）。dual模式下仍只从一处读取", "default": "local" },
+      "external_type": { "description": "外部数据库类型", "type": "string", "options": ["sqlite", "mysql", "postgresql"], "hint": "外部联网数据库类型。sqlite=本地/网络共享SQLite文件, mysql=MySQL/MariaDB远程服务器, postgresql=PostgreSQL远程服务器", "default": "sqlite" },
+      "external_db_path": { "description": "外部 SQLite 数据库文件路径", "type": "string", "hint": "仅在 external_type=sqlite 时生效。支持本地路径或网络共享路径，如 D:/shared/online.db", "default": "" },
+      "external_host": { "description": "外部数据库主机地址", "type": "string", "hint": "MySQL/PostgreSQL 服务器主机地址或 IP。仅在 external_type=mysql 或 postgresql 时生效", "default": "" },
+      "external_port": { "description": "外部数据库端口", "type": "int", "hint": "MySQL 默认3306, PostgreSQL 默认5432。仅在 external_type=mysql 或 postgresql 时生效", "default": 3306 },
+      "external_user": { "description": "外部数据库用户名", "type": "string", "hint": "连接外部联网数据库的用户名", "default": "" },
+      "external_password": { "description": "外部数据库密码", "type": "string", "hint": "连接外部联网数据库的密码", "default": "" },
+      "external_database": { "description": "外部数据库名", "type": "string", "hint": "要连接的外部数据库名称", "default": "" }
     }
   },
   "macro_definitions": {
@@ -133,13 +159,26 @@
     },
     "default": []
   },
+  "groups": {
+    "description": "QQ群号列表 — 机器人管理的群聊",
+    "type": "list",
+    "items": { "type": "string" },
+    "hint": "每行一个QQ群号。群服绑定关系请到 Web 管理面板 → 服务器管理 中配置。",
+    "default": []
+  },
+  "group_names": {
+    "description": "群号显示名称映射 — 给群号设置别名便于识别",
+    "type": "object",
+    "items": {},
+    "hint": "格式: {\"群号\": \"显示名称\"}。例: {\"768445978\": \"管理群\", \"1107506823\": \"mc投票群\"}。也可通过 Web 管理面板 → 服务器管理 中编辑。",
+    "default": {}
+  },
   "servers": {
-    "description": "RCON 服务器槽位 — 每个对象绑定一个群和一台 MC 服务器。可自由增减，JSON 格式编辑所有字段。",
-    "type": "string",
-    "hint": "JSON 数组。每元素含：group_id, name, rcon_host, rcon_port(默认25575), rcon_password, game_port(默认25565), whitelist_qqs(数组), public_commands(数组), vote_enabled(bool), vote_threshold(int), vote_ttl(int), vote_min_agree_on_timeout(int), vote_tie_strategy(fail/pass/admin), admin_decide_ttl(int), relay_enabled(bool), query_enabled(bool)。\n\n示例：\n[\n  {\n    \"group_id\": \"123456789\",\n    \"name\": \"生存一区\",\n    \"rcon_host\": \"127.0.0.1\",\n    \"rcon_port\": \"25575\",\n    \"rcon_password\": \"your_rcon_pwd\",\n    \"game_port\": \"25565\",\n    \"whitelist_qqs\": [\"111\"],\n    \"public_commands\": [\"list\", \"say\"],\n    \"vote_enabled\": false,\n    \"vote_threshold\": 3,\n    \"vote_ttl\": 60,\n    \"vote_min_agree_on_timeout\": 1,\n    \"vote_tie_strategy\": \"fail\",\n    \"admin_decide_ttl\": 120,\n    \"relay_enabled\": false,\n    \"query_enabled\": true\n  }\n]",
-    "default": "[]",
-    "editor_mode": true,
-    "editor_language": "json"
+    "description": "服务器名称列表 — 每行一个服务器名称",
+    "type": "list",
+    "items": { "type": "string" },
+    "hint": "仅需填写服务器名称。RCON地址/端口/密码/白名单/投票等详细配置以及群服绑定，请到 Web 管理面板 → 服务器管理 中编辑。",
+    "default": []
   },
   "web_panel": {
     "description": "Web 管理面板（端口9949 图形化配置）",
