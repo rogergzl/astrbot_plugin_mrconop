@@ -373,6 +373,20 @@ class MrconPlugin(Star):
             logger.warning(f"[mrcon] 快捷命令启停设置加载失败: {e}")
             self.quick_cmd_settings = {}
 
+        # 读取自定义命令映射
+        self.custom_cmds_path = os.path.join(self.plugin_data_dir, "custom_cmds.json")
+        self.custom_cmds = {}  # {group_id: [{alias, rcon_cmd, description, enabled, whitelist, created_at}]}
+        try:
+            if os.path.exists(self.custom_cmds_path):
+                with open(self.custom_cmds_path, "r", encoding="utf-8") as f:
+                    self.custom_cmds = json.load(f)
+                    if not isinstance(self.custom_cmds, dict):
+                        self.custom_cmds = {}
+            logger.info(f"[mrcon] 已加载自定义命令映射 ({len(self.custom_cmds)} 群)")
+        except Exception as e:
+            logger.warning(f"[mrcon] 自定义命令映射加载失败: {e}")
+            self.custom_cmds = {}
+
         servers_raw = self.config.get("servers", [])
         if isinstance(servers_raw, list):
             servers = servers_raw
@@ -961,6 +975,16 @@ class MrconPlugin(Star):
         except Exception as e:
             logger.error(f"[mrcon] 保存快捷命令启停设置失败: {e}")
 
+    def _save_custom_cmds(self):
+        """保存自定义命令映射"""
+        try:
+            sp = self.custom_cmds_path
+            os.makedirs(os.path.dirname(sp), exist_ok=True)
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(self.custom_cmds, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[mrcon] 保存自定义命令映射失败: {e}")
+
     async def _check_online_triggers(self, player: str, srv_name: str, gid: str, conf: dict, now: int):
         for t in self.online_triggers:
             if not t.get("enabled"):
@@ -1079,6 +1103,8 @@ class MrconPlugin(Star):
     def _get_tracker_config(self, gid: str) -> dict:
         """获取某群的在线监控配置，优先群内覆盖，否则回退全局"""
         override = self._tracker_overrides.get(str(gid), {})
+        if override.get("use_global"):
+            override = {}
         return {
             "notify": override.get("notify_enabled", self.tracker_notify),
             "notify_target": override.get("notify_target", self.tracker_notify_target),
@@ -1550,7 +1576,7 @@ class MrconPlugin(Star):
                 f"  踢出阈值: {gcfg['kick_threshold']} 分钟\n"
                 f"  踢出封禁: {gcfg.get('ban_minutes', 0)} 分钟\n"
                 f"  踢出原因: {gcfg['kick_reason']}\n"
-                f"  {'🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
+                f"  {'🟢 使用全局' if ovr.get('use_global') else '🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
                 f"\n游戏格式占位: {{player}}=玩家名 {{duration}}=时长\n"
                 f"MC颜色码: §a绿 §b青 §c红 §e黄 §l粗体 §n下划线\n"
                 f"\n快速: /在线提醒 开,游戏提醒=开,踢出=开,阈值=720,封禁=30\n"
@@ -2760,6 +2786,48 @@ class MrconPlugin(Star):
                     return
                 async for msg in self.execute_and_reply(event, ln, f"脚本:{filename}"):
                     yield msg
+
+    # ==============================================================
+    # 自定义命令映射
+    # ==============================================================
+    @filter.command("rc自定", desc="执行自定义映射的RCON命令", alias={"rccustom"})
+    async def cmd_custom(self, event: AstrMessageEvent, alias: str = ""):
+        sender_qq = str(event.get_sender_id())
+        user_name = event.get_sender_name()
+        named = f"{user_name}({sender_qq})"
+        if not alias:
+            yield event.plain_result(f"你好, {named}, 请输入命令别名。\n用法: /rc自定 <别名>")
+            return
+        gid = self._get_group_id(event)
+        if not gid:
+            yield event.plain_result("请在群内使用此命令")
+            return
+        cmds = self.custom_cmds.get(gid, [])
+        match = None
+        for c in cmds:
+            if c.get("alias", "").strip() == alias.strip() and c.get("enabled", True):
+                match = c
+                break
+        if not match:
+            yield event.plain_result(f"未找到自定义命令「{alias}」")
+            return
+        # 权限：全局管理员 > 命令白名单 > 全局群白名单
+        wl = match.get("whitelist", [])
+        if not self.is_admin(sender_qq):
+            in_cmd_wl = wl and sender_qq in [str(w) for w in wl]
+            if not in_cmd_wl and not self.is_allowed(event):
+                yield event.plain_result("抱歉，你没有权限执行此自定义命令。")
+                return
+        rcon_cmd = match.get("rcon_cmd", "")
+        if not rcon_cmd:
+            yield event.plain_result(f"自定义命令「{alias}」未配置 RCON 命令")
+            return
+        show_reply = match.get("show_reply", True)
+        async for msg in self.execute_and_reply(event, rcon_cmd, f"自定:{alias}"):
+            if show_reply:
+                yield msg
+        if not show_reply:
+            yield event.plain_result(f"✅ 已执行自定义命令「{alias}」")
 
     # ==============================================================
     # 帮助
