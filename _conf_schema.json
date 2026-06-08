@@ -74,7 +74,7 @@
       "log_event_macros": {
         "description": "日志事件宏命令定义",
         "type": "list",
-        "hint": "监听服务器日志事件，触发自定义 RCON 命令。每个宏包含: id, name, enabled, event_type, server_name, commands, cooldown",
+        "hint": "监听服务器日志事件，触发自定义 RCON 命令。字段: name, enabled, event_types(事件类型数组,多选OR;兼容旧event_type,可选值: player_first_join/player_join/player_leave/player_kick/player_death/player_first_death/player_respawn/player_death_pvp/player_advancement/player_chat/player_item_get/admin_join/vip_join/server_start/server_stop/server_reload/boss_kill/tps_low/tps_critical/memory_high/server_perf_issue/player_online_duration), server_name, player_name(可选), commands, qq_message(可选,支持{player}{server}{event_type}{event_param}变量), cooldown, delay(延时秒), max_triggers(频率限制次), trigger_window(频率窗口秒), event_param(匹配日志行内容关键词), gate_mode(and/or), conditions(多条件数组,每条件含type:player|content/value/not)。由 Web 管理面板自动维护。",
         "default": []
       },
       "event_macro_game_prefix": {
@@ -86,6 +86,11 @@
         "description": "通用游戏通知前缀",
         "type": "string",
         "hint": "插件主动发送的游戏内通知（如 /bc）的前缀，如 §6[通知]", "default": "§6[通知]"
+      },
+      "admin_mc_ids": {
+        "description": "管理员MC ID列表",
+        "type": "string",
+        "hint": "逗号分隔的管理员玩家 MC ID，用于触发 admin_join 事件宏，如 Steve,Admin2", "default": ""
       }
     }
   },
@@ -122,10 +127,13 @@
       "notify_in_game": { "description": "在游戏内同步提醒", "type": "bool", "hint": "通过RCON say命令在游戏公屏提醒玩家", "default": false },
       "notify_game_format": { "description": "游戏内提醒格式", "type": "string", "hint": "{player}=玩家名 {duration}=时长, RCON say命令发送", "default": "{player} 已连续在线 {duration}，注意休息！" },
       "notify_game_prefix": { "description": "游戏内提醒前缀", "type": "string", "hint": "RCON say命令的消息前缀颜色码，如 §e[在线提醒]", "default": "§e[在线提醒]" },
+      "notify_mention_mode": { "description": "群内@提醒模式", "type": "string", "options": ["player", "text", "admin", "custom"], "hint": "player=@绑定玩家 text=纯文本不@任何人 admin=@管理员 custom=自定义@格式(见下)", "default": "player" },
+      "notify_mention_format": { "description": "群内@提醒自定义格式", "type": "string", "hint": "仅custom模式生效。占位: {qq}=QQ号 {player}=MC玩家名 {mc_id}=MC ID {duration}=时长 {dur_label}=在线类型 {server}=服务器名。例: @{qq} {player} 你已{dur_label}在线 {duration}", "default": "@{qq} {player} 你已{dur_label}在线 {duration}" },
       "auto_kick_enabled": { "description": "启用超时自动踢出", "type": "bool", "hint": "玩家单次在线超过阈值时自动踢出", "default": false },
       "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 480 },
       "auto_kick_reason": { "description": "踢出原因文本", "type": "string", "hint": "支持 {player} 占位符替换为玩家名", "default": "你已连续在线过久，请休息一下！" },
       "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 },
+      "duration_mode": { "description": "时长计算模式", "type": "string", "options": ["session", "cumulative"], "hint": "session=单次连续在线计时（只算当前会话）, cumulative=累计在线计时（统计所有历史在线时长总和）", "default": "session" },
       "log_patterns": {
             "description": "用户自定义日志分类匹配模式 (type->regex)，优先于默认模式",
             "type": "object",

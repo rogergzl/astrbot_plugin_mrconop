@@ -15,7 +15,7 @@ except ImportError:
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Plain, At
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
@@ -52,7 +52,7 @@ def safe_json_write(path: str, data):
         logger.error(f"[mrcon] JSON 写入失败 {path}: {e}")
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "3.11.1")
+@register("mrcon", "lindagao", "MC 综合管理插件", "3.12.0")
 class MrconPlugin(Star):
     # ==============================================================
     # 初始化
@@ -128,11 +128,18 @@ class MrconPlugin(Star):
         self.tracker_notify_game = bool(tracker_cfg.get("notify_in_game", False))
         self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "{player} 已连续在线 {duration}，注意休息！") or "")
         self.tracker_game_prefix = str(tracker_cfg.get("notify_game_prefix", "§e[在线提醒]") or "")
+        self.tracker_notify_mention_mode = str(tracker_cfg.get("notify_mention_mode", "player") or "player")  # player/text/admin/custom
+        self.tracker_notify_mention_format = str(tracker_cfg.get("notify_mention_format", "@{qq} {player} 你已{dur_label}在线 {duration}") or "")
+
+        # 已验证的真实玩家名集合（仅通过 player_join 日志事件加入，防止命名实体等误导入）
+        self._known_real_players: set[str] = set()
 
         # 事件宏游戏前缀
         self.event_macro_game_prefix = str(general_cfg.get("event_macro_game_prefix", "§b[宏]") or "")
         self.game_notify_prefix = str(general_cfg.get("game_notify_prefix", "§6[通知]") or "")
+        self.admin_mc_ids = [s.strip() for s in str(general_cfg.get("admin_mc_ids", "") or "").split(",") if s.strip()]
         self.tracker_ban_minutes = int(tracker_cfg.get("auto_kick_ban_minutes", 30) or 30)
+        self.tracker_duration_mode = str(tracker_cfg.get("duration_mode", "session") or "session")
         self.ranking_reset_hours = int(tracker_cfg.get("ranking_reset_interval_hours", 0) or 0)  # 0=不自动重置
         self._last_ranking_reset = 0
         self._pending_msgs = {}     # gid → [(msg, group_name)]
@@ -152,6 +159,7 @@ class MrconPlugin(Star):
             self._log_listener.reload_patterns(log_patterns)
         self._event_macros = list(general_cfg.get("log_event_macros", []) or [])
         self._event_macro_cooldowns: dict[str, float] = {}  # macro_id → next_allowed_at
+        self._event_macro_freq_buckets: dict[str, list[float]] = {}  # macro_id → [timestamps]
 
         relay_cfg = self.config.get("relay", {})
         if not isinstance(relay_cfg, dict):
@@ -230,6 +238,13 @@ class MrconPlugin(Star):
                 if k not in gc or not gc[k]:  # 仅在 config 缺失或为空时用文件值
                     gc[k] = v
             logger.info(f"[mrcon] 通用覆盖已同步到内存: {list(gov.keys())}")
+        # 优先从独立 JSON 文件加载事件宏
+        json_macros = self._load_event_macros_json()
+        if json_macros is not None:
+            self._event_macros = json_macros
+        elif self._event_macros:
+            # 首次：将 config.yaml 中的事件宏写入 JSON 文件
+            self._save_event_macros_json()
         self.scripts_dir = os.path.join(self.plugin_data_dir, str(general_cfg.get("scripts_dir", "scripts") or "scripts"))
         self.audit_file = os.path.join(self.plugin_data_dir, "audit.log")
         self.pending_select = {}
@@ -595,6 +610,7 @@ class MrconPlugin(Star):
             )
         self.db.migrate_from_json(self.player_db_path, self.online_sessions_path)
         self._online_cache = {}
+        self._online_duration_triggered = {}  # key: "{macro_id}:{server}:{player}" -> True (已触发过)
         self._last_online_refresh = 0
         self._tracker_task = None
 
@@ -1275,6 +1291,31 @@ class MrconPlugin(Star):
         except Exception as e:
             logger.warning(f"[mrcon] 保存通用覆盖失败: {e}")
 
+    def _save_event_macros_json(self):
+        """持久化事件宏到独立 JSON 文件"""
+        fpath = os.path.join(self.plugin_data_dir, "event_macros.json")
+        try:
+            os.makedirs(self.plugin_data_dir, exist_ok=True)
+            with open(fpath, 'w', encoding='utf-8') as f:
+                json.dump(self._event_macros, f, ensure_ascii=False, indent=2)
+            logger.debug(f"[mrcon] 事件宏已保存到 event_macros.json")
+        except Exception as e:
+            logger.warning(f"[mrcon] 保存事件宏 JSON 失败: {e}")
+
+    def _load_event_macros_json(self):
+        """从独立 JSON 文件加载事件宏（优先于 config.yaml）"""
+        fpath = os.path.join(self.plugin_data_dir, "event_macros.json")
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    logger.info(f"[mrcon] 从 event_macros.json 加载了 {len(data)} 个事件宏")
+                    return data
+            except Exception as e:
+                logger.warning(f"[mrcon] 读取 event_macros.json 失败: {e}")
+        return None
+
     def _load_server_log_configs(self):
         """从 JSON 文件加载服务器日志配置，覆盖到运行时 server 列表"""
         fpath = os.path.join(self.plugin_data_dir, "server_log_configs.json")
@@ -1330,6 +1371,13 @@ class MrconPlugin(Star):
         except Exception as e:
             logger.warning(f"[mrcon] 保存服务器日志配置失败: {e}")
 
+    _PLAYER_NAME_RE = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
+
+    @classmethod
+    def _is_valid_player_name(cls, name: str) -> bool:
+        """校验 Minecraft Java Edition 玩家名（3-16字符，仅字母数字下划线）"""
+        return bool(name and cls._PLAYER_NAME_RE.match(name))
+
     def _get_tracker_config(self, gid: str) -> dict:
         """获取某群的在线监控配置，优先群内覆盖，否则回退全局"""
         override = self._tracker_overrides.get(str(gid), {})
@@ -1342,11 +1390,124 @@ class MrconPlugin(Star):
             "notify_game": override.get("notify_in_game", self.tracker_notify_game),
             "notify_game_format": override.get("notify_game_format", self.tracker_game_format),
             "notify_game_prefix": override.get("notify_game_prefix", self.tracker_game_prefix),
+            "notify_mention_mode": override.get("notify_mention_mode", self.tracker_notify_mention_mode),
+            "notify_mention_format": override.get("notify_mention_format", self.tracker_notify_mention_format),
             "kick_enabled": override.get("kick_enabled", self.tracker_kick_enabled),
             "kick_threshold": override.get("kick_threshold", self.tracker_kick_threshold),
             "kick_reason": override.get("kick_reason", self.tracker_kick_reason),
             "ban_minutes": override.get("ban_minutes", self.tracker_ban_minutes),
+            "duration_mode": override.get("duration_mode", self.tracker_duration_mode),
         }
+
+    async def _send_tracker_notify(self, gid: str, srv_name: str, player: str,
+                                    dur_label: str, dur_text: str, tcfg: dict,
+                                    is_kick: bool = False, error_msg: str = ""):
+        """即时发送在线追踪通知到群，支持@玩家/管理员/自定义格式"""
+        mention_mode = tcfg.get("notify_mention_mode", "player")
+        mention_fmt = tcfg.get("notify_mention_format", "@{qq} {player} 你已{dur_label}在线 {duration}")
+
+        # 查询玩家QQ绑定
+        qq_id = ""
+        try:
+            row = self.db.find_player_by_mc_id(player)
+            if row:
+                qq_id = str(row.get("qq_id", ""))
+        except Exception:
+            pass
+
+        # 获取管理员QQ列表
+        admin_qqs = list(self.admin_qqs) if hasattr(self, 'admin_qqs') and self.admin_qqs else []
+
+        # 构建通知文本（基础文本，不含@）
+        if is_kick:
+            if error_msg:
+                base_text = f"⚠️ {player} 超时需踢出但执行失败 [{srv_name}]: {error_msg}"
+            else:
+                base_text = f"🚫 {player} {dur_label}在线超过 {dur_text}，已被自动踢出 [{srv_name}]"
+        else:
+            base_text = f"⏰ {player} 已在 [{srv_name}] {dur_label}在线 {dur_text}"
+
+        try:
+            umo = self._get_group_umo(gid)
+        except Exception:
+            logger.warning(f"[mrcon] 无法获取群 {gid} 的 UMO，跳过通知")
+            return
+
+        if mention_mode == "player" and qq_id:
+            # @绑定玩家
+            try:
+                chain = MessageChain(chain=[
+                    At(qq=int(qq_id)),
+                    Plain(f" {base_text}")
+                ])
+                await self.context.send_message(umo, chain)
+            except Exception as e:
+                logger.error(f"[mrcon] @玩家通知失败: {e}，降级为纯文本")
+                chain = MessageChain(chain=[Plain(base_text)])
+                await self.context.send_message(umo, chain)
+
+        elif mention_mode == "admin" and admin_qqs:
+            # @管理员
+            chain_parts = []
+            for aq in admin_qqs:
+                try:
+                    chain_parts.append(At(qq=int(aq)))
+                except Exception:
+                    pass
+            chain_parts.append(Plain(f" {base_text}"))
+            try:
+                chain = MessageChain(chain=chain_parts)
+                await self.context.send_message(umo, chain)
+            except Exception as e:
+                logger.error(f"[mrcon] @管理员通知失败: {e}")
+                chain = MessageChain(chain=[Plain(base_text)])
+                await self.context.send_message(umo, chain)
+
+        elif mention_mode == "custom" and mention_fmt:
+            # 自定义格式
+            custom_text = mention_fmt.replace("{qq}", qq_id)\
+                .replace("{player}", player)\
+                .replace("{mc_id}", player)\
+                .replace("{duration}", dur_text)\
+                .replace("{dur_label}", dur_label)\
+                .replace("{server}", srv_name)
+            # 检查自定义格式中是否有 @{qq} 需要转换为 At
+            if "@{" in custom_text and qq_id:
+                import re
+                parts = []
+                last_idx = 0
+                for m in re.finditer(r'@\{(\w+)\}', custom_text):
+                    parts.append(Plain(custom_text[last_idx:m.start()]))
+                    var_name = m.group(1)
+                    if var_name == "qq" and qq_id:
+                        try:
+                            parts.append(At(qq=int(qq_id)))
+                        except Exception:
+                            parts.append(Plain(f"@{qq_id}"))
+                    elif var_name == "admin" and admin_qqs:
+                        for aq in admin_qqs:
+                            try:
+                                parts.append(At(qq=int(aq)))
+                            except Exception:
+                                pass
+                    else:
+                        # 其他变量逐字输出
+                        parts.append(Plain(m.group(0)))
+                    last_idx = m.end()
+                parts.append(Plain(custom_text[last_idx:]))
+                parts = [p for p in parts if not (isinstance(p, Plain) and not p.text)]
+                chain = MessageChain(chain=parts)
+            else:
+                chain = MessageChain(chain=[Plain(custom_text)])
+            try:
+                await self.context.send_message(umo, chain)
+            except Exception as e:
+                logger.error(f"[mrcon] 自定义格式通知失败: {e}")
+
+        else:
+            # 纯文本模式 (默认)
+            chain = MessageChain(chain=[Plain(base_text)])
+            await self.context.send_message(umo, chain)
 
     async def _online_tracker_loop(self):
         logger.info("[mrcon] 在线时长监控已启动")
@@ -1392,10 +1553,24 @@ class MrconPlugin(Star):
                                 self.db.save_online_state(srv_name, player, str(gid), now)
                             except Exception:
                                 pass
+                            # 自动将新在线玩家录入数据库
+                            try:
+                                existing = self.db.find_player_by_mc_id(player)
+                                if not existing:
+                                    if self._is_valid_player_name(player):
+                                        self.db.insert_player_raw("_imported_" + player, player, 50, now)
+                            except Exception:
+                                pass
                             # 检查上线触发器
                             await self._check_online_triggers(player, srv_name, str(gid), conf, now)
                         cache = self._online_cache[sid]
                         session_mins = (now - cache["login_at"]) // 60
+                        # 累计在线模式：加上数据库中的历史在线总时长
+                        duration_mode = tcfg.get("duration_mode", "session")
+                        if duration_mode == "cumulative":
+                            total_secs = self.db.get_player_total_seconds(player)
+                            session_mins += total_secs // 60
+                        dur_label = "累计" if duration_mode == "cumulative" else "连续"
                         # 通知检查（群内 + 游戏内）
                         if tcfg["notify"]:
                             intervals = sorted(tcfg["notify_intervals"], reverse=True)
@@ -1408,8 +1583,11 @@ class MrconPlugin(Star):
                                         dur_text = f"{h}时{m}分" if m else f"{h}小时"
                                     else:
                                         dur_text = f"{m}分钟"
-                                    msg = f"⏰ {player} 已在 [{srv_name}] 连续在线 {dur_text}"
-                                    self._pending_msgs.setdefault(str(gid), []).append(msg)
+                                    # 即时发送群通知（带@支持）
+                                    await self._send_tracker_notify(
+                                        str(gid), srv_name, player, dur_label, dur_text,
+                                        tcfg, is_kick=False
+                                    )
                                     # 游戏内提醒
                                     if tcfg["notify_game"]:
                                         prefix = tcfg.get("notify_game_prefix", self.tracker_game_prefix)
@@ -1432,7 +1610,11 @@ class MrconPlugin(Star):
                                     conf["rcon_password"], kick_cmd,
                                 )
                                 logger.info(f"[mrcon] 自动踢出 {player} @ {srv_name}: {reason}")
-                                msg = f"🚫 {player} 连续在线超过 {tcfg['kick_threshold']} 分钟，已被自动踢出 [{srv_name}]"
+                                # 即时发送踢出通知
+                                await self._send_tracker_notify(
+                                    str(gid), srv_name, player, dur_label, f"{tcfg['kick_threshold']}分钟",
+                                    tcfg, is_kick=True
+                                )
                                 # 踢出后封禁
                                 ban_mins = tcfg["ban_minutes"]
                                 if ban_mins > 0:
@@ -1444,11 +1626,88 @@ class MrconPlugin(Star):
                                         "unban_at": now + ban_mins * 60,
                                         "player": player, "conf": conf,
                                     }
-                                    msg += f"，已封禁 {ban_mins} 分钟"
                             except Exception as e:
                                 logger.error(f"[mrcon] 自动踢出失败: {e}")
-                                msg = f"⚠️ {player} 超时需踢出但执行失败 [{srv_name}]: {e}"
-                            self._pending_msgs.setdefault(str(gid), []).append(msg)
+                                await self._send_tracker_notify(
+                                    str(gid), srv_name, player, dur_label, f"{tcfg['kick_threshold']}分钟",
+                                    tcfg, is_kick=True, error_msg=str(e)
+                                )
+                    # 在线时长事件宏检查
+                    if self._event_macros:
+                        for macro in self._event_macros:
+                            if not macro.get("enabled", False):
+                                continue
+                            event_types = macro.get("event_types") or []
+                            if isinstance(event_types, list) and event_types and isinstance(event_types[0], str):
+                                # 旧格式：[str] — 转为新格式
+                                event_types = [{"type": et} for et in event_types if et]
+                            for et in event_types:
+                                if not isinstance(et, dict):
+                                    continue
+                                if et.get("type", "").strip() != "player_online_duration":
+                                    continue
+                                dur_min = int(et.get("duration_minutes", 0) or 0)
+                                if dur_min <= 0:
+                                    continue
+                                dur_mode = str(et.get("duration_mode", "session") or "session")
+                                macro_id = macro.get("id", "") or macro.get("name", "unknown")
+                                for sid, cache in list(self._online_cache.items()):
+                                    if cache["server"] != srv_name:
+                                        continue
+                                    player_name = cache["player"]
+                                    # 玩家名过滤
+                                    spec_player = str(macro.get("player_name", "") or "").strip()
+                                    if spec_player and player_name.lower() != spec_player.lower():
+                                        continue
+                                    trigger_key = f"{macro_id}:{srv_name}:{player_name}"
+                                    if trigger_key in self._online_duration_triggered:
+                                        continue
+                                    now_ts = int(time.time())
+                                    session_mins_t = (now_ts - cache["login_at"]) // 60
+                                    total_mins = session_mins_t
+                                    if dur_mode == "cumulative":
+                                        total_secs = self.db.get_player_total_seconds(player_name)
+                                        total_mins += total_secs // 60
+                                    if total_mins >= dur_min:
+                                        self._online_duration_triggered[trigger_key] = True
+                                        pre_delay = float(et.get("pre_delay", 0) or 0)
+                                        per_cmds = et.get("commands", [])
+                                        cmds = per_cmds if per_cmds else macro.get("commands", [])
+                                        if not isinstance(cmds, list):
+                                            cmds = [str(cmds)]
+                                        if pre_delay > 0:
+                                            await asyncio.sleep(pre_delay)
+                                        for cmd_entry in cmds:
+                                            if isinstance(cmd_entry, dict):
+                                                cmd = str(cmd_entry.get("cmd", ""))
+                                                cmd_delay = float(cmd_entry.get("delay", 0) or 0)
+                                            else:
+                                                cmd = str(cmd_entry)
+                                                cmd_delay = 0
+                                            if not cmd:
+                                                continue
+                                            if cmd_delay > 0:
+                                                await asyncio.sleep(cmd_delay)
+                                            cmd = cmd.replace("{player}", player_name).replace("{PLAYER}", player_name)
+                                            if cmd.strip().lower().startswith("say ") and self.event_macro_game_prefix:
+                                                cmd = "say " + self.event_macro_game_prefix + " " + cmd[4:].strip()
+                                            try:
+                                                resp = await self._rcn_send(
+                                                    conf["rcon_host"], int(conf["rcon_port"]),
+                                                    conf["rcon_password"], cmd,
+                                                )
+                                                logger.info(f"[OnlineDur] 宏 '{macro.get('name','?')}' 触发: {player_name}({total_mins}min) -> {cmd} -> {resp[:80]}")
+                                            except Exception as e:
+                                                logger.warning(f"[OnlineDur] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
+                                        # QQ通知
+                                        qq_msg = (macro.get("qq_message") or "").strip()
+                                        if qq_msg:
+                                            qq_msg = qq_msg.replace("{player}", player_name).replace("{server}", srv_name)
+                                            qq_msg = qq_msg.replace("{event_type}", "player_online_duration")
+                                            try:
+                                                await self._send_group_message(str(gid), qq_msg)
+                                            except Exception as e:
+                                                logger.warning(f"[OnlineDur] QQ通知失败: {e}")
                     for sid in list(self._online_cache.keys()):
                         s = self._online_cache[sid]
                         if s["server"] == srv_name and s["player"] not in online:
@@ -1458,6 +1717,10 @@ class MrconPlugin(Star):
                             except Exception:
                                 pass
                             del self._online_cache[sid]
+                            # 清理在线时长事件宏已触发记录
+                            to_remove = [k for k in self._online_duration_triggered if k.endswith(f":{srv_name}:{s['player']}")]
+                            for k in to_remove:
+                                del self._online_duration_triggered[k]
                 # 定时重置在线时长排行
                 if self.ranking_reset_hours > 0:
                     last = self._last_ranking_reset
@@ -1517,6 +1780,9 @@ class MrconPlugin(Star):
         else:
             logger.warning("[mrcon] 日志监听已启用但无服务器配置 log_path，请在服务器管理中填写日志路径")
 
+    # ==============================================================
+    # 日志事件回调
+    # ==============================================================
     async def _on_log_event(self, server_name: str, event_type: str, player: str, raw_line: str):
         """日志事件回调"""
         logger.info(f"[LogEvent] [{server_name}] {event_type}: {player} ({raw_line[:60]})")
@@ -1542,7 +1808,37 @@ class MrconPlugin(Star):
             logger.info(f"[mrcon] 日志互通 [总闸关闭] [{server_name}] {event_type} 已拦截（请在Web面板 ⚙️全局设置 中开启📡日志监听开关）")
 
         # 匹配并执行事件宏
-        await self._execute_event_macros(server_name, event_type, player)
+        await self._execute_event_macros(server_name, event_type, player, raw_line)
+
+        # chat 事件也触发 player_chat 宏（用于匹配特定玩家发送特定内容）
+        if event_type == "chat":
+            await self._execute_event_macros(server_name, "player_chat", player, raw_line)
+
+        # 对 player_join / player_death 派生产生"首次"事件
+        if event_type == "player_join":
+            # 记录为已验证的真实玩家（player_join 日志是识别玩家的权威来源）
+            if self._is_valid_player_name(player):
+                self._known_real_players.add(player.lower())
+            p = self.db.find_player_by_mc_id(player)
+            if not p:
+                # 自动入库，防止下次加入重复触发首次事件
+                if self._is_valid_player_name(player):
+                    self.db.insert_player_raw("_imported_" + player, player, 50, int(time.time()))
+                await self._execute_event_macros(server_name, "player_first_join", player, raw_line)
+            # 派生 admin_join：玩家在管理员列表中
+            if self.admin_mc_ids and player in self.admin_mc_ids:
+                await self._execute_event_macros(server_name, "admin_join", player, raw_line)
+            # 派生 vip_join：玩家 vip_level > 0
+            if p and p.get("vip_level", 0) > 0:
+                await self._execute_event_macros(server_name, "vip_join", player, raw_line)
+        elif event_type == "player_death":
+            p = self.db.find_player_by_mc_id(player)
+            if not p:
+                # 仅对已验证的真实玩家（曾出现在 player_join 日志中）才自动入库
+                # player_death 日志可能匹配命名实体死亡，不作为导入依据
+                if self._is_valid_player_name(player) and player.lower() in self._known_real_players:
+                    self.db.insert_player_raw("_imported_" + player, player, 50, int(time.time()))
+                await self._execute_event_macros(server_name, "player_first_death", player, raw_line)
 
     def _get_group_umo(self, gid: str) -> str:
         """获取群 unified_msg_origin：优先缓存 → 用已提取的前缀模板拼接 → 回退硬编码"""
@@ -1675,7 +1971,7 @@ class MrconPlugin(Star):
         else:
             logger.debug(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} 未转发（无匹配群或日志类型/开关未启用）")
 
-    async def _execute_event_macros(self, server_name: str, event_type: str, player: str):
+    async def _execute_event_macros(self, server_name: str, event_type: str, player: str, raw_line: str = ""):
         """遍历事件宏，匹配的则执行 RCON 命令"""
         now = time.time()
         for i, macro in enumerate(self._event_macros):
@@ -1683,47 +1979,155 @@ class MrconPlugin(Star):
                 continue
             if not macro.get("enabled", False):
                 continue
-            if macro.get("event_type", "") != event_type:
+            # 事件类型匹配：event_types 支持新旧两种格式
+            # 旧格式: ["player_join", "player_death"]  → 字符串数组
+            # 新格式: [{type, pre_delay, post_delay, commands}, ...] → 对象数组（每事件独立延时+命令）
+            raw_ets = macro.get("event_types", [])
+            if not raw_ets or not isinstance(raw_ets, list):
+                raw_ets = [macro.get("event_type", "")]
+            raw_ets = [et for et in raw_ets if et]  # 过滤空值
+            matched_et = None  # 匹配到的事件类型对象（新格式）
+            is_str_ets = raw_ets and isinstance(raw_ets[0], str)  # 旧格式（字符串数组）
+            if is_str_ets:
+                if event_type not in raw_ets:
+                    continue
+            else:
+                for et in raw_ets:
+                    if isinstance(et, dict) and et.get("type") == event_type:
+                        matched_et = et
+                        break
+                if not matched_et:
+                    continue
+            # 检查 player_name 过滤器（限定玩家，可选）
+            player_filter = (macro.get("player_name", "") or "").strip()
+            if player_filter and player_filter != player:
                 continue
-            # 检查冷却
+            # 检查 event_param 过滤器（匹配特定内容，如物品名/Boss名/TPS日志行等）
+            event_param = (macro.get("event_param", "") or "").strip()
+            if event_param and raw_line and event_param.lower() not in raw_line.lower():
+                continue
+            # 检查多条件数组（支持与门 AND / 或门 OR + 每条件非门 NOT）
+            conditions = macro.get("conditions", [])
+            if conditions and isinstance(conditions, list) and len(conditions) > 0:
+                gate_mode = macro.get("gate_mode", "and") or "and"  # 默认 AND
+                cond_results = []
+                for cond in conditions:
+                    if not isinstance(cond, dict):
+                        continue
+                    ct = cond.get("type", "player")
+                    cv = (cond.get("value", "") or "").strip()
+                    if not cv:
+                        continue
+                    # 评估单个条件
+                    matched = False
+                    if ct == "player" and cv == player:
+                        matched = True
+                    elif ct == "content" and raw_line and cv.lower() in raw_line.lower():
+                        matched = True
+                    # 非门反转
+                    if cond.get("not", False):
+                        matched = not matched
+                    cond_results.append(matched)
+                if gate_mode == "or":
+                    # 或门：任一条件满足即可
+                    if cond_results and not any(cond_results):
+                        continue
+                else:
+                    # 与门（默认）：所有条件都必须满足
+                    if cond_results and not all(cond_results):
+                        continue
             cid = str(macro.get("id", str(i)))
+            # 新格式：使用匹配到的事件类型的延时；旧格式：使用全局 delay
+            pre_delay = float(matched_et.get("pre_delay", 0) or 0) if matched_et else float(macro.get("delay", 0) or 0)
+            post_delay = float(matched_et.get("post_delay", 0) or 0) if matched_et else 0
+            # 新格式：匹配到的事件类型有独立命令则优先使用；否则用全局命令
+            per_cmds = matched_et.get("commands", []) if matched_et else []
+            if not isinstance(per_cmds, list):
+                per_cmds = [str(per_cmds)]
+            # 前延时：等待后执行命令
+            if pre_delay > 0:
+                await asyncio.sleep(pre_delay)
+            # 检查冷却
             cooldown = float(macro.get("cooldown", 0) or 0)
             if cid in self._event_macro_cooldowns:
                 if now < self._event_macro_cooldowns[cid]:
                     continue
+            # 检查频率限制（x次/y秒窗口）
+            max_triggers = int(macro.get("max_triggers", 0) or 0)
+            trigger_window = int(macro.get("trigger_window", 0) or 0)
+            if max_triggers > 0 and trigger_window > 0:
+                bucket = self._event_macro_freq_buckets.setdefault(cid, [])
+                # 清理过期时间戳
+                bucket = [t for t in bucket if now - t < trigger_window]
+                self._event_macro_freq_buckets[cid] = bucket
+                if len(bucket) >= max_triggers:
+                    logger.debug(f"[LogEvent] 宏 '{macro.get('name','?')}' 频率限制已达 {max_triggers}/{trigger_window}s")
+                    continue
+                bucket.append(now)
             # 查找目标服务器
             target_srv = macro.get("server_name", "")
             cmds = macro.get("commands", [])
             if not isinstance(cmds, list):
                 cmds = [str(cmds)]
-            if not cmds:
-                continue
             # 查找服务器配置
             srv_conf = None
+            bound_gid = None
             for gid, srvs in self.group_servers.items():
                 for srv in srvs:
                     if srv.get("server_name", "") == target_srv:
                         srv_conf = srv
+                        bound_gid = str(gid)
                         break
                 if srv_conf:
                     break
             if not srv_conf:
                 logger.debug(f"[LogEvent] 宏 '{macro.get('name','?')}' 目标服务器 '{target_srv}' 未找到")
                 continue
-            # 执行命令
-            for cmd in cmds:
-                cmd = str(cmd).replace("{player}", player).replace("{PLAYER}", player)
-                # 如果命令以 say 开头，自动添加前缀
-                if cmd.strip().lower().startswith("say ") and self.event_macro_game_prefix:
-                    cmd = "say " + self.event_macro_game_prefix + " " + cmd[4:].strip()
+            # 执行 RCON 命令（优先使用匹配事件类型的独立命令，为空则用全局命令）
+            cmds = per_cmds if per_cmds else macro.get("commands", [])
+            if not isinstance(cmds, list):
+                cmds = [str(cmds)]
+            for cmd_entry in cmds:
+                    if isinstance(cmd_entry, dict):
+                        cmd = str(cmd_entry.get("cmd", ""))
+                        cmd_delay = float(cmd_entry.get("delay", 0) or 0)
+                    else:
+                        cmd = str(cmd_entry)
+                        cmd_delay = 0
+                    if not cmd:
+                        continue
+                    if cmd_delay > 0:
+                        await asyncio.sleep(cmd_delay)
+                    cmd = cmd.replace("{player}", player).replace("{PLAYER}", player)
+                    # 如果命令以 say 开头，自动添加前缀
+                    if cmd.strip().lower().startswith("say ") and self.event_macro_game_prefix:
+                        cmd = "say " + self.event_macro_game_prefix + " " + cmd[4:].strip()
+                    try:
+                        resp = await self._rcn_send(
+                            srv_conf["rcon_host"], int(srv_conf["rcon_port"]),
+                            srv_conf["rcon_password"], cmd,
+                        )
+                        logger.info(f"[LogEvent] 宏 '{macro.get('name','?')}' 执行: {cmd} -> {resp[:80]}")
+                    except Exception as e:
+                        logger.warning(f"[LogEvent] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
+            # 后延时：命令执行完后等待
+            if post_delay > 0:
+                await asyncio.sleep(post_delay)
+            # 发送 QQ 通知消息
+            qq_message = (macro.get("qq_message", "") or "").strip()
+            if qq_message and bound_gid:
+                qq_msg = (qq_message
+                    .replace("{player}", player).replace("{PLAYER}", player)
+                    .replace("{server}", server_name).replace("{SERVER}", server_name)
+                    .replace("{event_type}", event_type).replace("{EVENT_TYPE}", event_type)
+                    .replace("{event_param}", macro.get("event_param", "") or ""))
                 try:
-                    resp = await self._rcn_send(
-                        srv_conf["rcon_host"], int(srv_conf["rcon_port"]),
-                        srv_conf["rcon_password"], cmd,
-                    )
-                    logger.info(f"[LogEvent] 宏 '{macro.get('name','?')}' 执行: {cmd} -> {resp[:80]}")
+                    umo = self._get_group_umo(bound_gid)
+                    chain = MessageChain(chain=[Plain(qq_msg)])
+                    await self.context.send_message(umo, chain)
+                    logger.info(f"[LogEvent] 宏 '{macro.get('name','?')}' QQ通知 → {bound_gid}: {qq_msg[:60]}")
                 except Exception as e:
-                    logger.warning(f"[LogEvent] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
+                    logger.warning(f"[LogEvent] 宏 '{macro.get('name','?')}' QQ通知失败 ({bound_gid}): {e}")
             # 记录冷却
             if cooldown > 0:
                 self._event_macro_cooldowns[cid] = now + cooldown
@@ -2053,10 +2457,17 @@ class MrconPlugin(Star):
             # 状态
             ni = gcfg["notify_intervals"]
             gf = gcfg.get("notify_game_format", "")
+            dm = gcfg.get("duration_mode", "session")
+            dm_label = "累计在线" if dm == "cumulative" else "单次连续在线"
+            mm = gcfg.get("notify_mention_mode", "player")
+            mm_label = {"player": "@绑定玩家", "text": "纯文本", "admin": "@管理员", "custom": "自定义格式"}.get(mm, mm)
+            mf = gcfg.get("notify_mention_format", "@{qq} {player} 你已{dur_label}在线 {duration}")
             yield event.plain_result(
                 f"📋 本群在线提醒配置\n"
                 f"  提醒开关: {'✅ 开' if gcfg['notify'] else '❌ 关'}\n"
                 f"  提醒目标: {gcfg['notify_target']}\n"
+                f"  @模式: {mm_label}\n"
+                f"  @格式: {mf}\n"
                 f"  提醒节点: {ni} (分钟)\n"
                 f"  游戏提醒: {'✅ 开' if gcfg.get('notify_game') else '❌ 关'}\n"
                 f"  游戏格式: {gf}\n"
@@ -2064,11 +2475,14 @@ class MrconPlugin(Star):
                 f"  踢出阈值: {gcfg['kick_threshold']} 分钟\n"
                 f"  踢出封禁: {gcfg.get('ban_minutes', 0)} 分钟\n"
                 f"  踢出原因: {gcfg['kick_reason']}\n"
+                f"  时长模式: {dm_label}\n"
                 f"  {'🟢 使用全局' if ovr.get('use_global') else '🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
                 f"\n游戏格式占位: {{player}}=玩家名 {{duration}}=时长\n"
+                f"@格式占位: {{qq}}=QQ号 {{player}}=玩家名 {{mc_id}}=MC ID {{duration}}=时长 {{dur_label}}=在线类型 {{server}}=服务器\n"
+                f"@模式: player=@绑定玩家 text=纯文本 admin=@管理员 custom=自定义格式\n"
                 f"MC颜色码: §a绿 §b青 §c红 §e黄 §l粗体 §n下划线\n"
-                f"\n快速: /在线提醒 开,游戏提醒=开,踢出=开,阈值=720,封禁=30\n"
-                f"分步: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|重置"
+                f"\n快速: /在线提醒 开,游戏提醒=开,踢出=开,阈值=720,封禁=30,模式=累计,@模式=player\n"
+                f"分步: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|模式|@模式|@格式|重置"
             )
             return
 
@@ -2112,6 +2526,14 @@ class MrconPlugin(Star):
                         except ValueError: pass
                     elif k == "原因":
                         ovr["kick_reason"] = v
+                    elif k == "模式":
+                        if v in ("session", "cumulative", "连续", "累计"):
+                            ovr["duration_mode"] = "cumulative" if v in ("cumulative", "累计") else "session"
+                    elif k == "@模式":
+                        if v in ("player", "text", "admin", "custom"):
+                            ovr["notify_mention_mode"] = v
+                    elif k == "@格式":
+                        ovr["notify_mention_format"] = v
                     updated.append(f"{k}={v}")
                 else:
                     if p == "开":
@@ -2233,7 +2655,29 @@ class MrconPlugin(Star):
                 yield event.plain_result("用法: /在线提醒 踢出 开 [阈值] | 踢出 关 | 踢出 原因 <文本>")
             return
 
-        yield event.plain_result("未知子命令。可用: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|重置")
+        if sub == "@模式":
+            if val1 not in ("player", "text", "admin", "custom"):
+                yield event.plain_result("用法: /在线提醒 @模式 <player|text|admin|custom>\nplayer=@绑定玩家 text=纯文本 admin=@管理员 custom=自定义格式")
+                return
+            ovr["notify_mention_mode"] = val1
+            self._save_tracker_overrides()
+            yield event.plain_result(f"✅ @模式已设为: {val1}")
+            return
+
+        if sub == "@格式":
+            raw = str(getattr(event, "message_str", "") or "").strip()
+            idx = raw.find("@格式")
+            if idx >= 0:
+                fmt = raw[idx + 3:].strip()
+                if fmt:
+                    ovr["notify_mention_format"] = fmt
+                    self._save_tracker_overrides()
+                    yield event.plain_result("✅ @自定义格式已更新\n占位: {qq} {player} {mc_id} {duration} {dur_label} {server}")
+                    return
+            yield event.plain_result("用法: /在线提醒 @格式 <文案>  ({qq}=QQ {player}=玩家 {duration}=时长 {server}=服务器)")
+            return
+
+        yield event.plain_result("未知子命令。可用: 开|关|节点|目标|游戏提醒|游戏格式|踢出|封禁|模式|@模式|@格式|重置")
 
     # ==============================================================
     # 玩家数据库命令

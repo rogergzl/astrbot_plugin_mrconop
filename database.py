@@ -124,6 +124,10 @@ class Database:
                     conn.execute("ALTER TABLE compensations ADD COLUMN group_id TEXT DEFAULT ''")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    conn.execute("ALTER TABLE players ADD COLUMN vip_level INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
                 conn.commit()
             finally:
                 conn.close()
@@ -269,7 +273,7 @@ class Database:
                             "INSERT INTO players (qq_id, mc_id, points, checkin_streak, last_checkin_date, first_login, last_login, created_at) VALUES (?, '', 0, 0, '', NULL, NULL, ?)",
                             (str(qq_id), now),
                         )
-                allowed = {"mc_id", "points", "checkin_streak", "last_checkin_date", "first_login", "last_login"}
+                allowed = {"mc_id", "points", "checkin_streak", "last_checkin_date", "first_login", "last_login", "vip_level"}
                 sets = {k: v for k, v in updates.items() if k in allowed}
                 if not sets:
                     return
@@ -494,7 +498,13 @@ class Database:
             conn = self._connect()
             try:
                 rows = conn.execute(
-                    "SELECT qq_id, mc_id, points, checkin_streak, last_checkin_date, created_at FROM players ORDER BY created_at DESC LIMIT ?",
+                    """SELECT p.qq_id, p.mc_id, p.points, p.checkin_streak, p.last_checkin_date,
+                              p.first_login, p.last_login, p.created_at, p.vip_level,
+                              COALESCE(SUM(s.end_ts - s.start_ts), 0) / 60 AS total_online_min
+                       FROM players p
+                       LEFT JOIN online_sessions s ON s.player_name = p.mc_id AND p.mc_id != ''
+                       GROUP BY p.qq_id
+                       ORDER BY p.created_at DESC LIMIT ?""",
                     (limit,),
                 ).fetchall()
                 return [dict(r) for r in rows]

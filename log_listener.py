@@ -17,8 +17,9 @@ DEFAULT_LOG_PATTERNS = [
     # 事件
     ("player_join", re.compile(r'(\w+) joined the game')),
     ("player_leave", re.compile(r'(\w+) left the game')),
+    ("player_chat", re.compile(r'<\s*(\w+)\s*>\s+(.+)')),  # 预置类型（与 chat 同正则），实际由 main._on_log_event 从 chat 事件派生；供自定义覆写
     ("player_death", re.compile(
-        r'(\w+) (?:was shot by|was slain by|was killed by|was frozen by|drowned|'
+        r'(\w+) (?:drowned|'
         r'fell|went up in flames|burned to death|starved to death|'
         r'was squished|was pricked to death|walked into|experienced kinetic energy|'
         r'blew up|was blown up|was fireballed|was stung to death|'
@@ -31,6 +32,25 @@ DEFAULT_LOG_PATTERNS = [
         r'was pummeled|was skewered|was roasted|was shredded)'
     )),
     ("player_advancement", re.compile(r'(\w+) has (?:completed the challenge|made the advancement)')),
+    # 玩家复活
+    ("player_respawn", re.compile(r'(\w+) (?:respawned|has respawned|returned to life|awoke|has come back)')),
+    # 玩家被踢出 / 断连
+    ("player_kick", re.compile(r'(\w+) lost connection:')),
+    # PVP 击杀: 玩家被另一玩家击杀
+    ("player_death_pvp", re.compile(r'(\w+) was (?:slain|killed|shot|frozen) by (\w+)')),
+    # 物品获得
+    ("player_item_get", re.compile(r'(\w+) has (?:obtained|acquired|received)')),
+    # 服务器生命周期
+    ("server_start", re.compile(r'Done \([^)]+\)!')),
+    ("server_stop", re.compile(r'Stopping(?: the)? server')),
+    ("server_reload", re.compile(r'Reloading')),
+    # Boss 击杀 (通用模组)
+    ("boss_kill", re.compile(r'(\w+) (?:has defeated|killed|slain) (?!the )(.+)')),
+    # TPS / 性能 / 内存告警 (Server 端日志)
+    ("tps_low", re.compile(r"Can't keep up!")),  # Vanilla/Paper "Can't keep up! Is the server overloaded?"
+    ("tps_critical", re.compile(r"Running\s+\d+ms\s+or\s+\d+\s+ticks\s+behind")),  # 严重延迟告警
+    ("memory_high", re.compile(r"(?:Memory|OutOfMemory|Out of memory)")),  # 内存告警
+    ("server_perf_issue", re.compile(r"(?:overloaded|server\s+is\s+lagging|skipping\s+\d+\s+tick)")),  # 综合性能异常
     # RCON 连接日志（标记为 system）
     ("system", re.compile(r'Thread RCON Client')),
     # 模组日志（标记为 system）
@@ -267,7 +287,7 @@ class LogListenerManager:
                         self._buffer.append(entry)
                         # 事件回调（chat + 游戏事件都触发）
                         etype = entry["type"]
-                        if etype in ("player_join", "player_leave", "player_death", "player_advancement", "chat", "command", "system", "other"):
+                        if etype in ("player_join", "player_leave", "player_death", "player_death_pvp", "player_advancement", "player_first_join", "player_first_death", "admin_join", "vip_join", "chat", "player_chat", "command", "system", "other", "player_kick", "player_item_get", "server_start", "server_stop", "server_reload", "boss_kill", "player_respawn"):
                             try:
                                 if EventCallback:
                                     await EventCallback(
