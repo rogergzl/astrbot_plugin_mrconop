@@ -151,6 +151,7 @@
       "require_msay": { "description": "仅允许 /msay 命令互通", "type": "bool", "hint": "开启后只允许通过 /msay 主动转发，群聊消息不自动转发", "default": false },
       "format_group": { "description": "群→MC 消息格式", "type": "string", "hint": "{name}=群昵称, {msg}=消息内容", "default": "[QQ] {name}: {msg}" },
       "format_mc": { "description": "MC→群 消息格式", "type": "string", "hint": "{player}=玩家名, {msg}=消息内容", "default": "[MC] {player}: {msg}" },
+      "log_type_prefixes": { "description": "日志转发类型前缀", "type": "object", "hint": "每种日志类型转发到群聊时添加的前缀（空字符串=不添加）。键为事件类型，值为前缀文本", "default": { "chat": "💬", "command": "⌨️", "player_death": "💀", "player_join": "🚪", "player_leave": "🚪", "player_advancement": "⭐", "system": "⚙️", "other": "📎" }, "items": {} },
       "group_settings": { "description": "分群 relay 覆盖配置（Web 面板自动维护）", "type": "object", "hint": "每个群独立的互联模式与目标服务器配置，由 Web 面板自动读写", "default": {}, "items": {} }
     }
   },

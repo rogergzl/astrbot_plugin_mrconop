@@ -137,6 +137,8 @@ class MrconPlugin(Star):
         self._last_ranking_reset = 0
         self._pending_msgs = {}     # gid → [(msg, group_name)]
         self._last_umo = {}         # gid → unified_msg_origin
+        self._umo_prefix = ""       # 从真实 UMO 提取的前缀模板（aiocqhttp:{self_id}:GroupMessage:）
+        self._recent_log_events: dict[tuple, float] = {}  # (server, type, player) → ts，去重窗口
         self._tracker_overrides = {}  # 稍后由 _load_tracker_overrides 填充
         self._pending_unbans = {}   # player_key → (unban_time, conf)
 
@@ -162,6 +164,7 @@ class MrconPlugin(Star):
         self.relay_fmt_mc_log = str(relay_cfg.get("format_mc_log", "") or "")  # 日志转发专用格式，空字符串=回退到 format_mc
         self.relay_require_msay = bool(relay_cfg.get("require_msay", False))  # 是否仅允许 /msay 命令互通
         self.relay_mc_to_group_log = bool(relay_cfg.get("mc_to_group_log", False))  # 日志监听驱动的服→群（低延迟变相方案）
+        self.log_type_prefixes = relay_cfg.get("log_type_prefixes", {}) or {}  # 日志转发类型前缀
         self._relay_overrides = relay_cfg.get("group_settings", {})  # gid → [{server_name, ...}] 从配置持久化加载
 
         player_db_cfg = self.config.get("player_db", {})
@@ -533,6 +536,31 @@ class MrconPlugin(Star):
                     f"web_mgmt={s.get('web_management_enabled')} "
                     f"host={s.get('rcon_host','?')}"
                 )
+
+        # 自动从服务器管理填充 group_names：RCON已配置 + web管理开启的群，用服务器名作为默认群名
+        _gn_changed = False
+        for gid, srvs in self.group_servers.items():
+            gid_s = str(gid)
+            if gid_s in self.group_names:
+                continue  # 已手动配置，不覆盖
+            for srv in srvs:
+                if not isinstance(srv, dict):
+                    continue
+                host = (srv.get("rcon_host") or "").strip()
+                web_mgmt = srv.get("web_management_enabled", True)
+                if host and web_mgmt:
+                    sn = (srv.get("server_name") or srv.get("display_name") or "").strip()
+                    if sn:
+                        self.group_names[gid_s] = sn
+                        _gn_changed = True
+                        break
+        if _gn_changed:
+            self.config["group_names"] = dict(self.group_names)
+            try:
+                self.config.save_config()
+            except Exception as e:
+                logger.warning(f"[mrcon] 自动填充 group_names 后保存失败: {e}")
+            logger.info(f"[mrcon] group_names 自动填充完成: {self.group_names}")
 
         # 从 JSON 文件恢复服务器日志配置（覆盖可能丢失的 config）
         self._load_server_log_configs()
@@ -1493,11 +1521,42 @@ class MrconPlugin(Star):
         """日志事件回调"""
         logger.info(f"[LogEvent] [{server_name}] {event_type}: {player} ({raw_line[:60]})")
 
-        # 日志驱动的服→群互通（每群独立控制，由 m2g_log_enabled 决定）
-        await self._relay_log_event_to_groups(server_name, event_type, player, raw_line)
+        # 去重：同一 (server, type, player) 组合在 DEDUP_WINDOW 秒内只处理一次
+        DEDUP_WINDOW = 5.0
+        _now = time.time()
+        _key = (server_name, event_type, player)
+        if _key in self._recent_log_events:
+            if _now - self._recent_log_events[_key] < DEDUP_WINDOW:
+                logger.debug(f"[mrcon] 日志事件去重跳过 [{server_name}] {event_type} {player}")
+                return
+        self._recent_log_events[_key] = _now
+        # 清理过期条目
+        stale = [k for k, ts in self._recent_log_events.items() if _now - ts > DEDUP_WINDOW * 2]
+        for k in stale:
+            self._recent_log_events.pop(k, None)
+
+        # 日志驱动的服→群互通（全局总闸 log_listener_enabled，每群由 m2g_log_enabled 独立控制）
+        if self.log_listener_enabled:
+            await self._relay_log_event_to_groups(server_name, event_type, player, raw_line)
+        else:
+            logger.info(f"[mrcon] 日志互通 [总闸关闭] [{server_name}] {event_type} 已拦截（请在Web面板 ⚙️全局设置 中开启📡日志监听开关）")
 
         # 匹配并执行事件宏
         await self._execute_event_macros(server_name, event_type, player)
+
+    def _get_group_umo(self, gid: str) -> str:
+        """获取群 unified_msg_origin：优先缓存 → 用已提取的前缀模板拼接 → 回退硬编码"""
+        cached = self._last_umo.get(str(gid))
+        if cached:
+            return cached
+        if self._umo_prefix:
+            # 示例: aiocqhttp:123456:GroupMessage: → aiocqhttp:123456:GroupMessage:1107506823
+            return f"{self._umo_prefix}{gid}"
+        return f"aiocqhttp:GroupMessage:{gid}"
+
+    def _resolve_group_display_name(self, gid: str) -> str:
+        """解析群显示名称：从名称与群号对照数据库（group_names）查询"""
+        return self.group_names.get(str(gid), str(gid))
 
     async def _relay_log_event_to_groups(self, server_name: str, event_type: str, player: str, raw_line: str):
         """基于日志监听的 MC→群 消息转发（~0.5-1s 延迟）"""
@@ -1533,21 +1592,44 @@ class MrconPlugin(Star):
                 msg = msg[:297] + "..."
             message = msg
 
-        count = 0
+        forwarded = {}  # gid → 群显示名
+
+        # 收集候选群：_relay_overrides（已配置转发规则的群）+ group_servers（服务器管理中绑定该服务器的群）
+        candidate_entries: dict[str, list[dict]] = {}
         for gid, entries in list(self._relay_overrides.items()):
             gid = str(gid)
+            candidate_entries.setdefault(gid, [])
             entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
+            candidate_entries[gid].extend(entry_list)
+
+        for gid, entry_list in candidate_entries.items():
+            gid = str(gid)
+            if gid in forwarded:
+                continue  # 已由另一条入口成功转发，跳过重复
+            # 校验服务器绑定
+            gid_srvs = self.group_servers.get(gid, [])
+            gid_map = self.group_map.get(gid, {})
+            matched_srv = False
+            for srv in (gid_srvs or []):
+                if not isinstance(srv, dict):
+                    continue
+                sn = srv.get("server_name") or srv.get("name", "")
+                if sn == server_name:
+                    matched_srv = True
+                    break
+            if not matched_srv and isinstance(gid_map, dict):
+                sn = gid_map.get("server_name") or gid_map.get("name", "")
+                if sn == server_name:
+                    matched_srv = True
+            if not matched_srv:
+                continue
             for entry in entry_list:
-                if not isinstance(entry, dict):
-                    continue
-                if entry.get("server_name") != server_name:
-                    continue
                 mode = entry.get("mode", "off")
                 if mode == "off":
                     continue
                 # 日志转发开关：global 跟全局, custom 跟每群
                 if mode == "global":
-                    if not self.relay_mc_to_group_log:
+                    if not self.log_listener_enabled:
                         continue
                 elif mode == "custom":
                     if not entry.get("m2g_log_enabled", False):
@@ -1556,7 +1638,14 @@ class MrconPlugin(Star):
                     continue
                 # 检查日志类型过滤（空列表=允许全部）
                 allowed_types = entry.get("log_types", [])
-                if allowed_types and event_type not in allowed_types:
+                # 展开逗号分隔的类型（如 "player_join,player_leave" 存为单个字符串）
+                expanded_types = []
+                for t in (allowed_types or []):
+                    for pt in str(t).split(","):
+                        pt = pt.strip()
+                        if pt:
+                            expanded_types.append(pt)
+                if expanded_types and event_type not in expanded_types:
                     continue
                 # 确定格式（日志转发格式优先，回退到通用服→群格式）
                 if mode == "global":
@@ -1566,18 +1655,25 @@ class MrconPlugin(Star):
                 else:
                     continue
                 text = fmt.replace("{player}", player).replace("{msg}", message).replace("{server}", server_name)
+                # 应用日志类型前缀（独立配置优先，全局兜底）
+                entry_prefixes = entry.get("log_type_prefixes", {}) if mode == "custom" else {}
+                prefix = entry_prefixes.get(event_type) or (self.log_type_prefixes or {}).get(event_type, "")
+                if prefix:
+                    text = f"{prefix} {text}"
+                gname = self._resolve_group_display_name(gid)
                 try:
-                    umo = f"napcat:GroupMessage:{gid}"
+                    umo = self._get_group_umo(gid)
                     chain = MessageChain(chain=[Plain(text)])
                     await self.context.send_message(umo, chain)
-                    count += 1
-                    logger.debug(f"[mrcon] 日志转发 MC→群 [{server_name}] -> QQ:{gid} {text[:60]}")
+                    forwarded[gid] = gname
+                    logger.info(f"[mrcon] 日志转发 MC→群 [{server_name}] -> {gname}({gid}) {text[:60]}")
                 except Exception as e:
-                    logger.error(f"[mrcon] 日志互通 MC→群 失败 {gid}: {e}")
-        if count:
-            logger.info(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} → {count} 群")
+                    logger.error(f"[mrcon] 日志互通 MC→群 失败 [{gname}({gid})]: {e}")
+        if forwarded:
+            gnames = ", ".join(f"{n}({g})" for g, n in forwarded.items())
+            logger.info(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} → {len(forwarded)} 群: {gnames}")
         else:
-            logger.debug(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} 无匹配群")
+            logger.debug(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} 未转发（无匹配群或日志类型/开关未启用）")
 
     async def _execute_event_macros(self, server_name: str, event_type: str, player: str):
         """遍历事件宏，匹配的则执行 RCON 命令"""
@@ -2654,11 +2750,26 @@ class MrconPlugin(Star):
         count = 0
         for gid, entries in list(self._relay_overrides.items()):
             gid = str(gid)
+            # 从服务器管理绑定中查该群是否关联此服务器
+            gid_srvs = self.group_servers.get(gid, [])
+            gid_map = self.group_map.get(gid, {})
+            matched_srv = False
+            for srv in (gid_srvs or []):
+                if not isinstance(srv, dict):
+                    continue
+                sn = srv.get("server_name") or srv.get("name", "")
+                if sn == server_name:
+                    matched_srv = True
+                    break
+            if not matched_srv and isinstance(gid_map, dict):
+                sn = gid_map.get("server_name") or gid_map.get("name", "")
+                if sn == server_name:
+                    matched_srv = True
+            if not matched_srv:
+                continue
             entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
             for entry in entry_list:
                 if not isinstance(entry, dict):
-                    continue
-                if entry.get("server_name") != server_name:
                     continue
                 mode = entry.get("mode", "off")
                 if mode == "off":
@@ -2674,13 +2785,14 @@ class MrconPlugin(Star):
                 else:
                     continue
                 text = fmt.replace("{player}", player).replace("{msg}", message).replace("{server}", server_name)
+                gname = self._resolve_group_display_name(gid)
                 try:
-                    umo = f"napcat:GroupMessage:{gid}"
+                    umo = self._get_group_umo(gid)
                     chain = MessageChain(chain=[Plain(text)])
                     await self.context.send_message(umo, chain)
                     count += 1
                 except Exception as e:
-                    logger.error(f"[mrcon] MC→群转发失败 {gid}: {e}")
+                    logger.error(f"[mrcon] MC→群转发失败 [{gname}({gid})]: {e}")
         if count == 0:
             logger.debug(f"[mrcon] MC 服 {server_name} 消息无匹配群")
         else:
@@ -2727,7 +2839,7 @@ class MrconPlugin(Star):
             log_relay_eff = False
             _mode = cfg["mode"]
             if _mode == "global":
-                log_relay_eff = self.relay_mc_to_group_log
+                log_relay_eff = self.log_listener_enabled
             elif _mode == "custom":
                 log_relay_eff = bool(ovr.get("m2g_log_enabled", False))
             log_relay_label = "✅ 开" if log_relay_eff else "❌ 关"
@@ -2744,7 +2856,7 @@ class MrconPlugin(Star):
                 f"  仅 /msay: {'✅ 开（只允许命令互通）' if cfg.get('require_msay') else '❌ 关（自动转发群消息）'}\n"
                 f"  服→群日志格式: {cfg.get('format_mc_log') or '(同服→群格式)'}\n"
                 f"  目标服务器: {srv_display}\n"
-                f"  全局默认: 群→服={'✅' if self.relay_group_to_mc else '❌'} 服→群={'✅' if self.relay_mc_to_group else '❌'} 仅msay={'✅' if self.relay_require_msay else '❌'}（服→群日志由每群独立控制）\n"
+                f"  全局默认: 群→服={'✅' if self.relay_group_to_mc else '❌'} 服→群={'✅' if self.relay_mc_to_group else '❌'} 仅msay={'✅' if self.relay_require_msay else '❌'} 日志总闸={'✅' if self.relay_mc_to_group_log else '❌'}\n"
                 f"\n格式占位: {{name}}=群昵称 {{msg}}=消息内容\n"
                 f"\n子命令: 开|关|模式|群到服|服到群|服到群日志|仅msay|格式|日志格式|服|重置\n"
                 f"例: /消息互通 模式 custom\n"
@@ -2788,32 +2900,16 @@ class MrconPlugin(Star):
             return
 
         if sub in ("服", "服务器", "server"):
-            if not val:
-                # 列出可选服务器
-                srvs = self.group_servers.get(gid, [])
-                if not srvs:
-                    yield event.plain_result("当前群未绑定任何服务器")
-                    return
-                lines = ["可选服务器:"]
-                for s in srvs:
-                    sn = s.get("server_name", "")
-                    marker = " ← 当前" if ovr.get("server_name") == sn else ""
-                    lines.append(f"  • {sn}{marker}")
-                yield event.plain_result("\n".join(lines))
-                return
-            # 校验服务器名是否存在
+            # server_name 已从 relay override 中移除，直接读取服务器管理中的绑定关系
             srvs = self.group_servers.get(gid, [])
-            matched = None
-            for s in srvs:
-                if s.get("server_name", "") == val:
-                    matched = val
-                    break
-            if matched is None:
-                yield event.plain_result(f"未找到服务器「{val}」，请用 /mclist 查看已绑定服务器")
+            if not srvs:
+                yield event.plain_result("当前群未绑定任何服务器，请在 Web 面板「服务器管理」中添加")
                 return
-            ovr["server_name"] = val
-            self._save_relay_overrides()
-            yield event.plain_result(f"✅ 消息互通目标服务器已设为: {val}")
+            lines = ["📡 本群绑定的服务器（消息互通自动关联）:"]
+            for s in srvs:
+                sn = s.get("server_name", "")
+                lines.append(f"  • {sn}")
+            yield event.plain_result("\n".join(lines) + "\n无需手动设置，服务器已自动关联")
             return
 
         if sub in ("模式", "mode"):
@@ -2889,8 +2985,13 @@ class MrconPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def _on_group_message(self, event: AstrMessageEvent):
         gid = self._get_group_id(event)
-        # 存储 UMO 并刷新生效中的通知消息
-        self._last_umo[str(gid)] = event
+        # 存储 UMO（用于日志驱动转发等主动消息场景）
+        umo = event.unified_msg_origin
+        self._last_umo[str(gid)] = umo
+        # 首次收到群消息时提取 UMO 前缀模板，后续构造回退 UMO 时使用
+        if not self._umo_prefix and umo:
+            idx = umo.rfind(":")
+            self._umo_prefix = umo[:idx + 1] if idx > 0 else umo + ":"
         async for msg in self._flush_pending_msgs(event):
             yield msg
         cfg = self._get_relay_config(gid)
@@ -2929,8 +3030,9 @@ class MrconPlugin(Star):
         for gid in list(self._pending_msgs.keys()):
             msgs = self._pending_msgs.pop(gid, None)
             if msgs:
+                gname = self._resolve_group_display_name(gid)
                 for msg in msgs:
-                    yield event.plain_result(f"[群{gid}] {msg}")
+                    yield event.plain_result(f"[{gname}] {msg}")
 
     # ==============================================================
     # RCON 命令（原有 + mcing 迁移）
@@ -3301,157 +3403,54 @@ class MrconPlugin(Star):
 
     # ==============================================================
     # 帮助
-    # ==============================================================
-    @filter.command("rchelp", desc="查看所有可用命令（图片版）", alias={"rc帮助", "帮助", "help", "mchelp"})
+    @filter.command("rchelp", desc="查看所有可用命令", alias={"rc帮助", "帮助", "help", "mchelp"})
     async def cmd_help(self, event: AstrMessageEvent):
-        if not _HAS_PIL:
-            yield event.plain_result(
-                "━━━ MRCon 命令帮助 ━━━\n\n"
-                "🖥️ MC查询: /mc /mcget /mclist /mcset /在线时长 /在线提醒\n"
-                "⚙️ 服务器管理: /mcadd /mcdel /mcup /mcshare /mcunshare /mccleanup\n"
-                "🎯 RCON: /mrcon /选服 /宏 /脚本 /rc赞同 /rc反对\n"
-                "👤 玩家: /绑定 /签到 /我的 /理赔 /理赔列表\n"
-                "💱 积分: /兑换列表 /兑换\n"
-                "🎰 抽奖: /抽奖 /奖品列表 /兑奖 /我的中奖\n"
-                "🔗 互联: /msay /消息互通\n"
-                "🌐 Web面板: http://localhost:9949\n\n"
-                "━━━ 详细帮助请升级 Pillow 后查看 ━━━\n"
-                "pip install Pillow"
-            )
-            return
-        img_bytes = self._render_help_image()
-        path = os.path.join(self.plugin_data_dir, "_tmp_help.png")
-        with open(path, "wb") as f:
-            f.write(img_bytes.read())
-        try:
-            from astrbot.api.message_components import Image as ImgComp, Plain as PlComp
-            yield event.chain_result(MessageChain([ImgComp.fromFileSystem(path)]))
-        except Exception:
-            try:
-                yield event.image_result(path)
-            except Exception:
-                yield event.plain_result("帮助图片已生成: " + path)
-
-    def _render_help_image(self) -> BytesIO:
-        # 字体检测
-        font_paths = [
-            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),
-            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simhei.ttf"),
-            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simsun.ttc"),
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        ]
-        font_path = None
-        for fp in font_paths:
-            if os.path.exists(fp):
-                font_path = fp
-                break
-        # 颜色 / 尺寸
-        BG = "#181825"       # 深色底
-        FG = "#cdd6f4"       # 正文
-        HL = "#89b4fa"       # 标题蓝
-        AC = "#a6e3a1"       # 命令绿
-        SUB = "#6c7086"      # 副标题灰
-        DIV = "#45475a"      # 分隔线色
-        W = 820
-        PAD_X, PAD_Y = 24, 18
-        LINE_H = 26
-        HEAD_H = 38
-        # 字体
-        try:
-            font = ImageFont.truetype(font_path or "", 16) if font_path else ImageFont.load_default()
-            font_sm = ImageFont.truetype(font_path or "", 13) if font_path else ImageFont.load_default()
-            font_hd = ImageFont.truetype(font_path or "", 20) if font_path else ImageFont.load_default()
-        except Exception:
-            font = font_sm = font_hd = ImageFont.load_default()
-        # 帮助内容 (section_header, [(command, desc)])
-        sections = [
-            ("🖥️ MC 查询", [
-                ("/mc", "所有服务器状态 + 在线玩家"),
-                ("/mcget <名>", "单服详情"),
-                ("/mclist", "服务器列表"),
-                ("/mcset <项> 1|0", "设置显示项"),
-                ("/在线时长 [服|玩家]", "在线排行"),
-                ("/在线提醒", "配置提醒与踢出"),
-            ]),
-            ("⚙️ 服务器", [
-                ("/mcadd <名> <IP:端口>", "添加"),
-                ("/mcdel <名>", "删除"),
-                ("/mcup <名> [新名] [新址]", "更新"),
-                ("/mcshare|mcunshare <名> <群>", "共享 / 取消"),
-                ("/mccleanup", "清理失效服务器"),
-            ]),
-            ("🎯 RCON", [
-                ("/mrcon <命令>", "执行 RCON 命令"),
-                ("/选服 <编号>", "选择目标服务器"),
-                ("/宏 <名> [参数]", "执行预设宏"),
-                ("/脚本 <文件名>", "执行脚本"),
-                ("/rc赞同|反对  /rc通过|否决", "投票 + 裁决"),
-            ]),
-            ("👤 玩家", [
-                ("/绑定 <MC_ID>", "绑定 MC 账号"),
-                ("/签到", "每日签到"),
-                ("/我的", "积分与统计"),
-                ("/理赔 <命令>", "申请物品补偿"),
-                ("/理赔列表 | 同意|拒绝理赔", "审批管理"),
-            ]),
-            ("💱 积分 & 🎰 抽奖", [
-                ("/兑换列表 /兑换 <编号>", "积分兑换"),
-                ("/抽奖 /奖品列表", "积分抽奖"),
-                ("/兑奖 <编号> /我的中奖", "兑奖 / 中奖记录"),
-            ]),
-            ("🔗 群服互联", [
-                ("/msay <消息>", "发消息到 MC 公屏"),
-                ("/消息互通 开|关", "开关互通"),
-                ("/消息互通 模式 off|global|custom", "转发模式"),
-                ("/消息互通 群到服|服到群 开|关", "方向开关"),
-                ("/消息互通 服到群日志 开|关", "日志驱动服→群"),
-                ("/消息互通 服 <名>", "指定目标服务器"),
-                ("/消息互通 格式 <文本>", "自定义格式 {name}/{msg}"),
-                ("/消息互通 日志格式 <文本>", "日志格式 {player}/{msg}"),
-                ("/消息互通 重置", "恢复默认"),
-            ]),
-            ("📡 日志事件", [
-                ("日志监听 + 事件宏", "Web 脚本页管理"),
-                ("MC→群(日志) ~0.5s 延迟", "变相服→群，无需模组"),
-                ("/rc自定 <别名>", "自定义 RCON 命令"),
-            ]),
-            ("🌐 Web 面板", [
-                ("http://localhost:9949", "浏览器管理面板"),
-                ("v" + self._get_version(), "自启: web_panel.enabled=true"),
-            ]),
-        ]
-        # 计算高度
-        total_h = PAD_Y * 2  # 上下padding
-        for title, cmds in sections:
-            total_h += HEAD_H + 4
-            total_h += len(cmds) * LINE_H + 10
-        total_h += 30  # footer
-        # 创建图片
-        img = PILImage.new("RGB", (W, total_h), BG)
-        draw = ImageDraw.Draw(img)
-        y = PAD_Y
-        # 标题
-        draw.text((PAD_X, y), "━━━  MRCon 命令帮助  ━━━", fill=HL, font=font_hd)
-        y += HEAD_H + 8
-        draw.line([(PAD_X, y), (W - PAD_X, y)], fill=DIV, width=1)
-        y += 10
-        for title, cmds in sections:
-            draw.text((PAD_X, y), title, fill=HL, font=font)
-            y += HEAD_H
-            for cmd, desc in cmds:
-                cmd_w = draw.textlength(cmd, font=font_sm)
-                draw.text((PAD_X, y + 2), cmd, fill=AC, font=font_sm)
-                draw.text((PAD_X + cmd_w + 14, y + 2), desc, fill=FG, font=font_sm)
-                y += LINE_H
-            y += 6
-            draw.line([(PAD_X, y), (W - PAD_X, y)], fill=DIV, width=1)
-            y += 10
-        draw.text((PAD_X, y), "输入  /rchelp  随时查看此帮助", fill=SUB, font=font_sm)
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        return buf
+        yield event.plain_result(
+            "━━━  MRCon 命令帮助  v" + self._get_version() + "  ━━━\n\n"
+            "🖥️ MC 查询\n"
+            "  /mc              所有服务器状态 + 在线玩家\n"
+            "  /mcget <名>      单服详情\n"
+            "  /mclist          服务器列表\n"
+            "  /mcset <项> 1|0  设置显示项\n"
+            "  /在线时长 [服|玩家] 在线排行\n"
+            "  /在线提醒         配置提醒与踢出\n\n"
+            "⚙️ 服务器\n"
+            "  /mcadd <名> <IP:端口>  添加\n"
+            "  /mcdel <名>             删除\n"
+            "  /mcup <名> [新名] [新址] 更新\n"
+            "  /mcshare|mcunshare <名> <群>  共享 / 取消\n"
+            "  /mccleanup              清理失效服务器\n\n"
+            "🎯 RCON\n"
+            "  /mrcon <命令>    执行 RCON 命令\n"
+            "  /选服 <编号>      选择目标服务器\n"
+            "  /宏 <名> [参数]   执行预设宏\n"
+            "  /脚本 <文件名>    执行脚本\n"
+            "  /rc赞同|反对  /rc通过|否决  投票 + 裁决\n\n"
+            "👤 玩家\n"
+            "  /绑定 <MC_ID>    绑定 MC 账号\n"
+            "  /签到            每日签到\n"
+            "  /我的            积分与统计\n"
+            "  /理赔 <命令>      申请物品补偿\n"
+            "  /理赔列表 | 同意|拒绝理赔  审批管理\n\n"
+            "💱 积分 & 🎰 抽奖\n"
+            "  /兑换列表 /兑换 <编号>  积分兑换\n"
+            "  /抽奖 /奖品列表         积分抽奖\n"
+            "  /兑奖 <编号> /我的中奖   兑奖 / 中奖记录\n\n"
+            "🔗 群服互联\n"
+            "  /msay <消息>             发消息到 MC 公屏\n"
+            "  /消息互通 开|关          开关互通\n"
+            "  /消息互通 模式 off|global|custom  转发模式\n"
+            "  /消息互通 群到服|服到群 开|关      方向开关\n"
+            "  /消息互通 服到群日志 开|关        日志驱动服→群\n"
+            "  /消息互通 服 <名>        指定目标服务器\n"
+            "  /消息互通 格式 <文本>    自定义格式 {name}/{msg}\n"
+            "  /消息互通 日志格式 <文本> 日志格式 {player}/{msg}\n"
+            "  /消息互通 重置           恢复默认\n\n"
+            "📡 日志 & 🌐 Web 面板\n"
+            "  /rc自定 <别名>           自定义 RCON 命令\n"
+            "  http://localhost:9949     Web 管理面板\n\n"
+            "输入  /rchelp  随时查看此帮助"
+        )
 
     def _get_version(self) -> str:
         try:
