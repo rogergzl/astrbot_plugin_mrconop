@@ -126,7 +126,14 @@
       "auto_kick_threshold": { "description": "踢出阈值（分钟）", "type": "int", "hint": "单次连续在线超过此时长则踢出", "default": 480 },
       "auto_kick_reason": { "description": "踢出原因文本", "type": "string", "hint": "支持 {player} 占位符替换为玩家名", "default": "你已连续在线过久，请休息一下！" },
       "auto_kick_ban_minutes": { "description": "踢出后封禁时长（分钟）", "type": "int", "hint": "踢出后封禁多少分钟，0=不封禁，到期自动解封", "default": 30 },
-      "log_listener_enabled": { "description": "RCON 日志监听", "type": "bool", "hint": "监控服务器 latest.log 日志文件，实时识别玩家死亡/进出/成就事件，驱动事件宏命令。需在服务器管理中为对应服务器填写日志路径", "default": false },
+      "log_patterns": {
+            "description": "用户自定义日志分类匹配模式 (type->regex)，优先于默认模式",
+            "type": "object",
+            "default": {},
+            "items": {},
+            "hint": "格式: {\"chat\":\"<\\\\s*(\\\\w+)\\\\s*>...\", \"type_name\":\"regex\"}"
+          },
+          "log_listener_enabled": { "description": "RCON 日志监听", "type": "bool", "hint": "监控服务器 latest.log 日志文件，实时识别玩家死亡/进出/成就事件，驱动事件宏命令。需在服务器管理中为对应服务器填写日志路径", "default": false },
       "online_history_max_bars": { "description": "在线时长记录柱状图最大条数", "type": "int", "hint": "在线页面时长记录图表最多显示的条数。影响美观性：竖着的条数越多，单条越窄；建议不超过100~150条（约2-3天数据量）", "default": 70 },
       "group_overrides": { "description": "分群覆盖配置", "type": "object", "hint": "各群的在线追踪独立设置，键为群号，值为覆盖字段对象（如 notify_enabled, kick_enabled 等）", "default": {}, "items": {} }
     }

@@ -8,8 +8,8 @@ import time
 
 logger = logging.getLogger("mrcon.log_listener")
 
-# ── 日志行分类模式（按优先级排列） ──────────────────────────
-_LOG_PATTERNS = [
+# ── 默认日志行分类模式（按优先级排列） ──────────────────────────
+DEFAULT_LOG_PATTERNS = [
     # 标签格式的异步聊天 [Async Chat Thread - #N/INFO]: <Player> Message
     ("chat", re.compile(r'<\s*(\w+)\s*>\s+(.+)')),
     # 指令
@@ -34,7 +34,7 @@ _LOG_PATTERNS = [
     # RCON 连接日志（标记为 system）
     ("system", re.compile(r'Thread RCON Client')),
     # 模组日志（标记为 system）
-    ("system", re.compile(r'\[(?:AstrBot|[Mm]rcon|Enigmatic Legacy|Ice and Fire|Tetra|[Bb]elt)\w*\]')),
+    ("system", re.compile(r'\[(?:AstrBot|[Mm]rcon|Enigmatic Legacy|Ice and Fire|Tetra|[Bb]elt)[^\]]*\]')),
 ]
 
 EventCallback = None  # type: ignore
@@ -43,20 +43,23 @@ EventCallback = None  # type: ignore
 MAX_LOG_ENTRIES = 2000
 
 
-def _classify_line(line: str) -> tuple[str, str, str]:
-    """返回 (type, player, extra)。type: chat/command/player_*/system/other"""
-    for etype, pattern in _LOG_PATTERNS:
-        m = pattern.search(line)
+def _classify_line_static(line: str, patterns: list | None = None) -> tuple[str, str, str]:
+    """静态分类函数，接受 patterns 参数。返回 (type, player, extra)"""
+    if patterns is None:
+        patterns = DEFAULT_LOG_PATTERNS
+    for etype, ptn in patterns:
+        m = ptn.search(line)
         if m:
-            player = m.group(1)
-            extra = m.group(2) if etype in ("chat",) else ""
+            try:
+                player = m.group(1)
+            except IndexError:
+                player = ""
+            try:
+                extra = m.group(2) if etype in ("chat",) else ""
+            except IndexError:
+                extra = ""
             return (etype, player, extra)
     return ("other", "", "")
-
-
-def _is_info_line(line: str) -> bool:
-    """过滤：只保留有意义的信息行"""
-    return bool(re.search(r'Thread.*(?:INFO|WARN|ERROR)\]', line))
 
 
 # ── LogWatcher ─────────────────────────────────────────────
@@ -64,11 +67,12 @@ def _is_info_line(line: str) -> bool:
 class LogWatcher:
     """监视单个 Minecraft 日志文件"""
 
-    def __init__(self, log_path: str, server_name: str):
+    def __init__(self, log_path: str, server_name: str, classify_fn=None):
         self.log_path = log_path
         self.server_name = server_name
         self._position = 0
         self._inode = 0
+        self._classify_fn = classify_fn or _classify_line_static
 
     def start(self):
         """跳到文件末尾（只处理新行）"""
@@ -111,7 +115,7 @@ class LogWatcher:
                 line = line.strip()
                 if not line:
                     continue
-                etype, player, extra = _classify_line(line)
+                etype, player, extra = self._classify_fn(line)
                 entries.append({
                     "ts": _now,
                     "server": self.server_name,
@@ -138,6 +142,41 @@ class LogListenerManager:
         self._running = False
         # 全量缓冲区（线程安全由 asyncio 单线程保证）
         self._buffer: collections.deque = collections.deque(maxlen=MAX_LOG_ENTRIES)
+        # 日志分类模式（可动态配置）
+        self._patterns: list = list(DEFAULT_LOG_PATTERNS)
+
+    def _classify_line(self, line: str) -> tuple[str, str, str]:
+        """使用当前配置的模式分类日志行"""
+        return _classify_line_static(line, self._patterns)
+
+    def reload_patterns(self, user_patterns: dict[str, str] | None = None):
+        """动态更新日志分类模式。user_patterns: {type: regex_string}，用户模式优先于默认"""
+        patterns = list(DEFAULT_LOG_PATTERNS)
+        if user_patterns:
+            for etype, pattern_str in user_patterns.items():
+                if not pattern_str or not str(pattern_str).strip():
+                    continue
+                try:
+                    patterns.insert(0, (etype, re.compile(str(pattern_str))))
+                    logger.info(f"[LogListener] 加载用户模式: {etype} = {pattern_str}")
+                except re.error as e:
+                    logger.warning(f"[LogListener] 用户模式编译失败 {etype}: {e}")
+        self._patterns = patterns
+        # 更新所有已有 watcher 的分类函数
+        for watcher in self._watchers.values():
+            watcher._classify_fn = self._classify_line
+
+    def get_patterns(self) -> dict[str, str]:
+        """返回当前用户自定义的模式（用于 Web 面板展示）"""
+        # 找出用户添加的模式（不在默认列表中的）
+        result = {}
+        default_strs = {str(ptn.pattern) for _, ptn in DEFAULT_LOG_PATTERNS}
+        for etype, ptn in self._patterns:
+            ptn_str = str(ptn.pattern)
+            if ptn_str not in default_strs:
+                if etype not in result:
+                    result[etype] = ptn_str
+        return result
 
     # ── 缓冲区读写 ─────────────────────────────────────────
 
@@ -181,7 +220,7 @@ class LogListenerManager:
         if not log_path or not os.path.isfile(log_path):
             logger.warning(f"[LogListener] 日志文件不存在: {log_path}")
             return
-        w = LogWatcher(log_path, server_name)
+        w = LogWatcher(log_path, server_name, self._classify_line)
         w.start()
         self._watchers[key] = w
 
@@ -228,7 +267,7 @@ class LogListenerManager:
                         self._buffer.append(entry)
                         # 事件回调（chat + 游戏事件都触发）
                         etype = entry["type"]
-                        if etype in ("player_join", "player_leave", "player_death", "player_advancement", "chat"):
+                        if etype in ("player_join", "player_leave", "player_death", "player_advancement", "chat", "command", "system", "other"):
                             try:
                                 if EventCallback:
                                     await EventCallback(

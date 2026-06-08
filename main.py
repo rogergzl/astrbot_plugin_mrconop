@@ -144,6 +144,10 @@ class MrconPlugin(Star):
         self.log_listener_enabled = bool(tracker_cfg.get("log_listener_enabled", False))
         self.online_history_max_bars = int(tracker_cfg.get("online_history_max_bars", 70) or 70)
         self._log_listener = LogListenerManager()
+        # 加载用户自定义日志分类模式
+        log_patterns = tracker_cfg.get("log_patterns", {})
+        if log_patterns and isinstance(log_patterns, dict):
+            self._log_listener.reload_patterns(log_patterns)
         self._event_macros = list(general_cfg.get("log_event_macros", []) or [])
         self._event_macro_cooldowns: dict[str, float] = {}  # macro_id → next_allowed_at
 
@@ -155,6 +159,7 @@ class MrconPlugin(Star):
         self.relay_mc_to_group = bool(relay_cfg.get("mc_to_group", False))
         self.relay_fmt_group = str(relay_cfg.get("format_group", "[QQ] {name}: {msg}"))
         self.relay_fmt_mc = str(relay_cfg.get("format_mc", "[MC] {player}: {msg}"))
+        self.relay_fmt_mc_log = str(relay_cfg.get("format_mc_log", "") or "")  # 日志转发专用格式，空字符串=回退到 format_mc
         self.relay_require_msay = bool(relay_cfg.get("require_msay", False))  # 是否仅允许 /msay 命令互通
         self.relay_mc_to_group_log = bool(relay_cfg.get("mc_to_group_log", False))  # 日志监听驱动的服→群（低延迟变相方案）
         self._relay_overrides = relay_cfg.get("group_settings", {})  # gid → [{server_name, ...}] 从配置持久化加载
@@ -212,6 +217,7 @@ class MrconPlugin(Star):
         self._trigger_cooldowns = {}
 
         self.plugin_data_dir = StarTools.get_data_dir("mrcon")
+        self.relay_overrides_path = os.path.join(self.plugin_data_dir, "relay_overrides.json")
         self._tracker_overrides = self._load_tracker_overrides()  # 从 JSON 文件加载群追踪覆盖
         # 加载通用设置的独立持久化
         gov = self._load_general_overrides()
@@ -530,6 +536,8 @@ class MrconPlugin(Star):
 
         # 从 JSON 文件恢复服务器日志配置（覆盖可能丢失的 config）
         self._load_server_log_configs()
+        # 从 JSON 文件恢复 relay 覆盖配置（避免 schema 验证丢失动态字段）
+        self._load_relay_overrides()
 
         # 兼容旧版 string 格式 config，转换为 list 格式
         if isinstance(servers_raw, str) and servers_raw.strip():
@@ -1485,9 +1493,8 @@ class MrconPlugin(Star):
         """日志事件回调"""
         logger.info(f"[LogEvent] [{server_name}] {event_type}: {player} ({raw_line[:60]})")
 
-        # 日志驱动的服→群互通（低延迟变相方案）
-        if self.relay_mc_to_group_log:
-            await self._relay_log_event_to_groups(server_name, event_type, player, raw_line)
+        # 日志驱动的服→群互通（每群独立控制，由 m2g_log_enabled 决定）
+        await self._relay_log_event_to_groups(server_name, event_type, player, raw_line)
 
         # 匹配并执行事件宏
         await self._execute_event_macros(server_name, event_type, player)
@@ -1495,7 +1502,7 @@ class MrconPlugin(Star):
     async def _relay_log_event_to_groups(self, server_name: str, event_type: str, player: str, raw_line: str):
         """基于日志监听的 MC→群 消息转发（~0.5-1s 延迟）"""
         import re as _re
-        # 从 raw_line 中提取聊天内容（chat 事件）
+        # 根据事件类型构造消息
         message = ""
         if event_type == "chat":
             m_chat = _re.search(r'<\s*\w+\s*>\s+(.+)', raw_line)
@@ -1504,17 +1511,27 @@ class MrconPlugin(Star):
             else:
                 return  # 无法解析聊天内容则跳过
         elif event_type == "player_join":
-            message = f"{player} 加入了服务器 {server_name}"
+            message = f"{player} 加入了服务器"
         elif event_type == "player_leave":
-            message = f"{player} 离开了服务器 {server_name}"
+            message = f"{player} 离开了服务器"
         elif event_type == "player_death":
             m_death = _re.search(r'\w+\s+(.+)', raw_line)
             message = m_death.group(1).strip() if m_death else f"{player} 死亡"
         elif event_type == "player_advancement":
             m_adv = _re.search(r'\w+ has (.+)', raw_line)
             message = m_adv.group(1).strip() if m_adv else f"{player} 获得成就"
+        elif event_type == "command":
+            message = f"[命令] {player}: {raw_line.strip()}"
+        elif event_type == "system":
+            msg = raw_line.strip()
+            if len(msg) > 300:
+                msg = msg[:297] + "..."
+            message = f"[系统] {msg}"
         else:
-            message = raw_line
+            msg = raw_line.strip()
+            if len(msg) > 300:
+                msg = msg[:297] + "..."
+            message = msg
 
         count = 0
         for gid, entries in list(self._relay_overrides.items()):
@@ -1528,12 +1545,24 @@ class MrconPlugin(Star):
                 mode = entry.get("mode", "off")
                 if mode == "off":
                     continue
+                # 日志转发开关：global 跟全局, custom 跟每群
                 if mode == "global":
-                    fmt = self.relay_fmt_mc
-                elif mode == "custom":
-                    if not entry.get("mc_to_group"):
+                    if not self.relay_mc_to_group_log:
                         continue
-                    fmt = entry.get("format_mc", self.relay_fmt_mc)
+                elif mode == "custom":
+                    if not entry.get("m2g_log_enabled", False):
+                        continue
+                else:
+                    continue
+                # 检查日志类型过滤（空列表=允许全部）
+                allowed_types = entry.get("log_types", [])
+                if allowed_types and event_type not in allowed_types:
+                    continue
+                # 确定格式（日志转发格式优先，回退到通用服→群格式）
+                if mode == "global":
+                    fmt = getattr(self, "relay_fmt_mc_log", None) or self.relay_fmt_mc
+                elif mode == "custom":
+                    fmt = entry.get("format_mc_log") or entry.get("format_mc", self.relay_fmt_mc)
                 else:
                     continue
                 text = fmt.replace("{player}", player).replace("{msg}", message).replace("{server}", server_name)
@@ -1542,6 +1571,7 @@ class MrconPlugin(Star):
                     chain = MessageChain(chain=[Plain(text)])
                     await self.context.send_message(umo, chain)
                     count += 1
+                    logger.debug(f"[mrcon] 日志转发 MC→群 [{server_name}] -> QQ:{gid} {text[:60]}")
                 except Exception as e:
                     logger.error(f"[mrcon] 日志互通 MC→群 失败 {gid}: {e}")
         if count:
@@ -2538,12 +2568,35 @@ class MrconPlugin(Star):
         return self._relay_overrides[gid]
 
     def _save_relay_overrides(self):
-        """持久化群服互联覆盖配置到 config"""
-        self.config["relay"]["group_settings"] = self._relay_overrides
+        """持久化群服互联覆盖配置到独立 JSON 文件（避免 schema 验证丢失动态字段）"""
         try:
+            with open(self.relay_overrides_path, 'w', encoding='utf-8') as f:
+                json.dump(self._relay_overrides, f, ensure_ascii=False, indent=2)
+            # 同步回 config 以兼容旧版
+            self.config.setdefault("relay", {})["group_settings"] = self._relay_overrides
             self.config.save_config()
         except Exception as e:
             logger.error(f"[mrcon] 保存 relay_overrides 失败: {e}")
+
+    def _load_relay_overrides(self):
+        """从独立 JSON 文件加载 relay overrides（优先级高于 config）"""
+        if os.path.exists(self.relay_overrides_path):
+            try:
+                with open(self.relay_overrides_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    combined = {}
+                    # 先合并 config 中已有的（兼容旧数据）
+                    cfg_gs = self.config.get("relay", {}).get("group_settings", {})
+                    if isinstance(cfg_gs, dict):
+                        combined.update(cfg_gs)
+                    # JSON 文件覆盖（优先级更高）
+                    combined.update(data)
+                    self._relay_overrides = combined
+                    logger.info(f"[mrcon] 从 relay_overrides.json 加载了 {len(combined)} 个群的 relay 配置")
+                    return
+            except Exception as e:
+                logger.warning(f"[mrcon] 读取 relay_overrides.json 失败: {e}")
 
     def _get_relay_config(self, gid: str) -> dict:
         """获取某群的消息互联配置，支持 mode: off/global/custom"""
@@ -2555,6 +2608,7 @@ class MrconPlugin(Star):
                 "enabled": False, "group_to_mc": False, "mc_to_group": False,
                 "mode": "off", "format_group": self.relay_fmt_group,
                 "format_mc": self.relay_fmt_mc,
+                "format_mc_log": None,
                 "require_msay": False,
                 "server_name": None, "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
             }
@@ -2566,6 +2620,7 @@ class MrconPlugin(Star):
                 "mode": "global",
                 "format_group": self.relay_fmt_group,
                 "format_mc": self.relay_fmt_mc,
+                "format_mc_log": getattr(self, "relay_fmt_mc_log", None),
                 "require_msay": self.relay_require_msay,
                 "server_name": override.get("server_name"),
                 "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
@@ -2578,6 +2633,7 @@ class MrconPlugin(Star):
                 "mode": "custom",
                 "format_group": override.get("format_group", self.relay_fmt_group),
                 "format_mc": override.get("format_mc", self.relay_fmt_mc),
+                "format_mc_log": override.get("format_mc_log", None),
                 "require_msay": override.get("require_msay", self.relay_require_msay),
                 "server_name": override.get("server_name", None),
                 "_resolved_server": conf.get("server_name") or conf.get("name", "未配置"),
@@ -2667,21 +2723,36 @@ class MrconPlugin(Star):
             relay_srv = self._get_relay_conf(gid) or {}
             srv_display = relay_srv.get("server_name") or relay_srv.get("name") or global_srv.get("name") or "未配置"
             mode_label = {"off": "❌ 不互通", "global": "🔵 遵循全局", "custom": "🟢 独立配置"}.get(cfg["mode"], cfg["mode"])
+            # 服→群(日志) 有效状态：off=关, global=跟全局, custom=每群独立
+            log_relay_eff = False
+            _mode = cfg["mode"]
+            if _mode == "global":
+                log_relay_eff = self.relay_mc_to_group_log
+            elif _mode == "custom":
+                log_relay_eff = bool(ovr.get("m2g_log_enabled", False))
+            log_relay_label = "✅ 开" if log_relay_eff else "❌ 关"
+            if _mode == "global" and not log_relay_eff:
+                log_relay_label += "（全局未开启）"
+            elif _mode == "custom" and not log_relay_eff:
+                log_relay_label += "（本群未开启）"
             yield event.plain_result(
                 f"📋 本群消息互联配置\n"
                 f"  模式: {mode_label}\n"
                 f"  群→服转发: {'✅ 开' if cfg['group_to_mc'] else '❌ 关'}\n"
                 f"  服→群转发: {'✅ 开' if cfg['mc_to_group'] else '❌ 关'}\n"
+                f"  服→群(日志): {log_relay_label}\n"
                 f"  仅 /msay: {'✅ 开（只允许命令互通）' if cfg.get('require_msay') else '❌ 关（自动转发群消息）'}\n"
-                f"  格式: {cfg['format_group']}\n"
+                f"  服→群日志格式: {cfg.get('format_mc_log') or '(同服→群格式)'}\n"
                 f"  目标服务器: {srv_display}\n"
-                f"  全局默认: 群→服={'✅' if self.relay_group_to_mc else '❌'} 服→群={'✅' if self.relay_mc_to_group else '❌'} 仅msay={'✅' if self.relay_require_msay else '❌'}\n"
+                f"  全局默认: 群→服={'✅' if self.relay_group_to_mc else '❌'} 服→群={'✅' if self.relay_mc_to_group else '❌'} 仅msay={'✅' if self.relay_require_msay else '❌'}（服→群日志由每群独立控制）\n"
                 f"\n格式占位: {{name}}=群昵称 {{msg}}=消息内容\n"
-                f"\n子命令: 开|关|模式|群到服|服到群|仅msay|格式|服|重置\n"
+                f"\n子命令: 开|关|模式|群到服|服到群|服到群日志|仅msay|格式|日志格式|服|重置\n"
                 f"例: /消息互通 模式 custom\n"
                 f"    /消息互通 群到服 开\n"
+                f"    /消息互通 服到群日志 开\n"
                 f"    /消息互通 仅msay 开（开启后只会通过 /msay 命令转发）\n"
                 f"    /消息互通 格式 [QQ] {name}: {msg}\n"
+                f"    /消息互通 日志格式 [日志] {player}: {msg}\n"
                 f"    /消息互通 服 生存一区\n"
                 f"    /消息互通 重置"
             )
@@ -2777,6 +2848,17 @@ class MrconPlugin(Star):
             yield event.plain_result(f"✅ 服→群转发已{'开启' if v else '关闭'}（模式: 独立配置）")
             return
 
+        if sub in ("服到群日志", "mc_to_group_log", "mtgl"):
+            if val not in ("on", "1", "开", "开启", "启用", "off", "0", "关", "关闭", "禁用"):
+                yield event.plain_result("用法: /消息互通 服到群日志 <开|关>")
+                return
+            v = val in ("on", "1", "开", "开启", "启用")
+            ovr["mode"] = "custom"
+            ovr["m2g_log_enabled"] = v
+            self._save_relay_overrides()
+            yield event.plain_result(f"✅ 本群服→群日志转发已{'开启' if v else '关闭'}（独立配置，基于日志监听 ~0.5s 延迟）")
+            return
+
         if sub in ("仅msay", "msay_only", "require_msay", "msay"):
             if val not in ("on", "1", "开", "开启", "启用", "off", "0", "关", "关闭", "禁用"):
                 yield event.plain_result("用法: /消息互通 仅msay <开|关>\n开启后只会通过 /msay 命令转发消息，不自动转发群消息")
@@ -2788,9 +2870,19 @@ class MrconPlugin(Star):
             yield event.plain_result(f"✅ 仅 /msay 命令互通已{'开启' if v else '关闭'}（模式: 独立配置）{' 只有通过 /msay 命令才能发消息到 MC' if v else ' 群内所有消息将自动转发到 MC'}")
             return
 
+        if sub in ("日志格式", "log_format", "fmt_log"):
+            if not val:
+                yield event.plain_result("用法: /消息互通 日志格式 <文本>  ({player}=玩家名 {msg}=消息 {server}=服名)")
+                return
+            ovr["mode"] = "custom"
+            ovr["format_mc_log"] = val
+            self._save_relay_overrides()
+            yield event.plain_result(f"✅ 服→群日志转发格式已设为: {val}")
+            return
+
         yield event.plain_result(
             f"未知子命令: {sub}\n"
-            f"可用: 开|关|格式|服|重置\n"
+            f"可用: 开|关|格式|日志格式|服|重置\n"
             f"直接 /消息互通 查看状态"
         )
 
@@ -3313,8 +3405,10 @@ class MrconPlugin(Star):
                 ("/消息互通 开|关", "开关互通"),
                 ("/消息互通 模式 off|global|custom", "转发模式"),
                 ("/消息互通 群到服|服到群 开|关", "方向开关"),
+                ("/消息互通 服到群日志 开|关", "日志驱动服→群"),
                 ("/消息互通 服 <名>", "指定目标服务器"),
                 ("/消息互通 格式 <文本>", "自定义格式 {name}/{msg}"),
+                ("/消息互通 日志格式 <文本>", "日志格式 {player}/{msg}"),
                 ("/消息互通 重置", "恢复默认"),
             ]),
             ("📡 日志事件", [
