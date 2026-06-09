@@ -1,20 +1,17 @@
-__pycache__/database.cpython-314.pyc
-__pycache__/main.cpython-314.pyc
-__pycache__/web_panel.cpython-314.pyc
-__pycache__/log_listener.cpython-314.pyc
-mrcon参考文件
-mrcon参考文件/开发日志.md
-mrcon参考文件/模块化重构.txt
-mrcon参考文件/思路.md
-mrcon参考文件/已知bug与新增思路.txt
-mrcon参考文件/mc日志参考.log
-mrcon参考文件/ftb命令网页.html
-mrcon参考文件/2026.5.29.md
-mrcon参考文件\DEVLOG.md
+# 所有 __pycache__ 目录
+**/__pycache__/
+
+# Python 编译文件
+*.pyc
+*.pyo
+*.pyd
+
+# 参考文件与日志
+mrcon参考文件/
+*.log
+*.md
+*.txt
+*.html
+
+# 根目录单独文件
 DEVLOG.md
-core\__pycache__
-core\__pycache__\__init__.cpython-314.pyc
-core\__pycache__\database.cpython-314.pyc
-core\__pycache__\online_tracker.cpython-314.pyc
-web\__pycache__
-web\__pycache__\server.cpython-314.pyc
