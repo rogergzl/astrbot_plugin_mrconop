@@ -252,5 +252,15 @@
       "session_timeout": { "description": "会话超时（秒）", "type": "int", "hint": "登录后无操作/后台多久自动登出，默认 600（10分钟）", "default": 600 },
       "log_viewer_refresh_ms": { "description": "日志查看器刷新间隔（毫秒）", "type": "int", "hint": "📄 日志查看器自动刷新间隔。间隔越短刷屏越严重，建议 ≥5000ms。设为 0 则关闭自动刷新", "default": 10000 }
     }
+  },
+  "audit": {
+    "description": "📋 审计日志 — 自动/系统RCON命令审计",
+    "type": "object",
+    "obvious_hint": true,
+    "hint": "控制事件宏、触发器、relay转发、在线提醒等自动RCON命令的审计记录。高频命令（RCON保活/轮询list）默认不审计。",
+    "items": {
+      "auto_enabled": { "description": "启用自动命令审计", "type": "bool", "hint": "事件宏、在线触发器、群服转发等系统自动触发的RCON命令是否记录到审计日志", "default": true },
+      "skip_categories": { "description": "跳过审计的类别", "type": "list", "items": { "type": "string" }, "hint": "不记录到审计日志的自动命令类别。可选值: event_macro(事件宏), online_duration_macro(在线时长宏), online_trigger(上线触发器), relay(群服转发), game_notify(游戏内提醒), keepalive(RCON保活), poll_list(在线轮询)。建议: relay 高频可跳过", "default": [] }
+    }
   }
 }

@@ -1,6 +1,7 @@
 """Minecraft 服务端日志文件监听 — 解析事件 + 全量日志缓冲区供 Web 查看"""
 import asyncio
 import collections
+import json
 import logging
 import os
 import re
@@ -155,8 +156,9 @@ class LogListenerManager:
     """管理多服务器日志监视器 + 全量日志缓冲区"""
 
     POLL_INTERVAL = 0.5
+    POSITION_SAVE_INTERVAL = 30  # 位置持久化间隔（秒）
 
-    def __init__(self):
+    def __init__(self, positions_file: str = ""):
         self._watchers: dict[str, LogWatcher] = {}
         self._task: asyncio.Task | None = None
         self._running = False
@@ -164,10 +166,68 @@ class LogListenerManager:
         self._buffer: collections.deque = collections.deque(maxlen=MAX_LOG_ENTRIES)
         # 日志分类模式（可动态配置）
         self._patterns: list = list(DEFAULT_LOG_PATTERNS)
+        # 日志文件读取位置持久化路径
+        self._positions_file = positions_file
+        self._last_position_save = 0.0
 
     def _classify_line(self, line: str) -> tuple[str, str, str]:
         """使用当前配置的模式分类日志行"""
         return _classify_line_static(line, self._patterns)
+
+    # ── 读取位置持久化 ───────────────────────────────────
+
+    def _load_positions(self) -> dict:
+        """从 JSON 文件加载上次保存的读取位置。返回 {key: {position, inode}}"""
+        if not self._positions_file or not os.path.isfile(self._positions_file):
+            return {}
+        try:
+            with open(self._positions_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.debug(f"[LogListener] 加载日志位置失败: {e}")
+        return {}
+
+    def _save_positions(self):
+        """将当前所有 watcher 的读取位置写入 JSON 文件"""
+        if not self._positions_file:
+            return
+        try:
+            data = {}
+            for key, w in self._watchers.items():
+                data[key] = {"position": w._position, "inode": w._inode}
+            os.makedirs(os.path.dirname(self._positions_file), exist_ok=True)
+            with open(self._positions_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"[LogListener] 保存日志位置失败: {e}")
+
+    def _restore_positions(self):
+        """将已保存的位置恢复到 watcher"""
+        saved = self._load_positions()
+        if not saved:
+            return
+        restored = 0
+        for key, w in self._watchers.items():
+            if key in saved:
+                pos_data = saved[key]
+                try:
+                    # 校验文件未变化（inode 匹配 + 文件大小 >= 位置）
+                    if os.path.exists(w.log_path):
+                        st = os.stat(w.log_path)
+                        if st.st_ino == pos_data.get("inode", 0) and st.st_size >= pos_data.get("position", 0):
+                            w._position = pos_data["position"]
+                            w._inode = pos_data["inode"]
+                            restored += 1
+                            logger.info(f"[LogWatcher] {w.server_name} 恢复位置 pos={w._position}")
+                            continue
+                except Exception:
+                    pass
+            # 无法恢复则跳到末尾
+            w.start()
+        if restored:
+            logger.info(f"[LogListener] 已恢复 {restored} 个日志文件的读取位置")
 
     def reload_patterns(self, user_patterns: dict[str, str] | None = None):
         """动态更新日志分类模式。user_patterns: {type: regex_string}，用户模式优先于默认"""
@@ -261,6 +321,8 @@ class LogListenerManager:
         global EventCallback
         EventCallback = callback
         self._running = True
+        # 尝试从持久化文件恢复位置（覆盖 add() 中的跳末尾）
+        self._restore_positions()
         self._task = asyncio.create_task(self._run())
         logger.info(f"[LogListener] 启动，监听 {len(self._watchers)} 个服务器")
 
@@ -273,12 +335,14 @@ class LogListenerManager:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             self._task = None
+        self._save_positions()
         self.clear()
         logger.info("[LogListener] 已停止")
 
     async def _run(self):
         while self._running:
             await asyncio.sleep(self.POLL_INTERVAL)
+            now_ts = time.time()
             for watcher in list(self._watchers.values()):
                 try:
                     entries = watcher.poll()
@@ -298,3 +362,7 @@ class LogListenerManager:
                                 logger.debug(f"[LogListener] callback error: {e}")
                 except Exception as e:
                     logger.debug(f"[LogListener] poll loop error: {e}")
+            # 定期持久化读取位置
+            if now_ts - self._last_position_save >= self.POSITION_SAVE_INTERVAL:
+                self._save_positions()
+                self._last_position_save = now_ts

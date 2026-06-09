@@ -104,8 +104,10 @@ async def _check_online_triggers(plugin, player: str, srv_name: str, gid: str, c
                     conf["rcon_password"], cmd,
                 )
                 logger.info(f"[mrcon] 触发器 [{t['name']}] 执行: {cmd} -> {resp[:80]}")
+                plugin._audit_auto("online_trigger", cmd, str(resp)[:500], True)
             except Exception as e:
                 logger.warning(f"[mrcon] 触发器 [{t['name']}] 失败: {cmd} -> {e}")
+                plugin._audit_auto("online_trigger", cmd, str(e)[:500], False)
 
 
 def _get_group_serv_data(plugin, group_id: str) -> dict:

@@ -122,9 +122,11 @@ async def _relay_to_mc(plugin, event: AstrMessageEvent, user_name: str, message:
         host = conf.get("rcon_host")
         port = conf.get("rcon_port")
         password = conf.get("rcon_password")
-        await _rcn_send(host, port, password, cmd)
+        resp = await _rcn_send(host, port, password, cmd)
+        plugin._audit_auto("relay", cmd[:200], str(resp)[:200] if resp else "", True)
     except Exception as e:
         logger.debug(f"[mrcon] relay to MC failed: {e}")
+        plugin._audit_auto("relay", f"tellraw @a [gid={gid}]", str(e)[:200], False)
 
 
 async def cmd_msay(plugin, event: AstrMessageEvent, text: str = "", rest=None):

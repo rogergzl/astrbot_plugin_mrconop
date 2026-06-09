@@ -9,9 +9,6 @@
 # 参考文件与日志
 mrcon参考文件/
 *.log
-*.md
+mrcon参考文件/*.md
 *.txt
 *.html
-
-# 根目录单独文件
-DEVLOG.md

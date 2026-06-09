@@ -449,12 +449,15 @@ async def _online_tracker_loop(plugin):
                                     prefix = tcfg.get("notify_game_prefix", plugin.tracker_game_prefix)
                                     game_msg = tcfg["notify_game_format"].replace("{player}", player).replace("{duration}", dur_text)
                                     try:
+                                        game_cmd = f"say {prefix} {game_msg}"
                                         await _rcn_send(
                                             conf["rcon_host"], conf["rcon_port"],
-                                            conf["rcon_password"], f"say {prefix} {game_msg}",
+                                            conf["rcon_password"], game_cmd,
                                         )
+                                        plugin._audit_auto("game_notify", game_cmd[:200], "", True)
                                     except Exception as e:
                                         logger.error(f"[mrcon] 游戏内提醒失败: {e}")
+                                        plugin._audit_auto("game_notify", game_cmd[:200], str(e)[:200], False)
                     if tcfg["kick_enabled"] and not cache["kicked"] and session_mins >= tcfg["kick_threshold"]:
                         cache["kicked"] = True
                         ban_mins = tcfg["ban_minutes"]
@@ -526,6 +529,10 @@ async def _online_tracker_loop(plugin):
                                     cmds = per_cmds if per_cmds else macro.get("commands", [])
                                     if not isinstance(cmds, list):
                                         cmds = [str(cmds)]
+                                    # 查DB获取绑定信息
+                                    player_rec = plugin.db.find_player_by_mc_id(player_name) if plugin.pdb_enabled else None
+                                    _mc_id = player_rec.get("mc_id", player_name) if player_rec else player_name
+                                    _qq_id = str(player_rec.get("qq_id", "")) if player_rec else ""
                                     if pre_delay > 0:
                                         await asyncio.sleep(pre_delay)
                                     for cmd_entry in cmds:
@@ -539,20 +546,31 @@ async def _online_tracker_loop(plugin):
                                             continue
                                         if cmd_delay > 0:
                                             await asyncio.sleep(cmd_delay)
-                                        cmd = cmd.replace("{player}", player_name).replace("{PLAYER}", player_name)
-                                        if cmd.strip().lower().startswith("say ") and plugin.event_macro_game_prefix:
-                                            cmd = "say " + plugin.event_macro_game_prefix + " " + cmd[4:].strip()
+                                        cmd = cmd.replace("{player}", player_name).replace("{PLAYER}", player_name).replace("{mc_id}", _mc_id).replace("{qq}", _qq_id)
+                                        cmd_lower = cmd.strip().lower()
+                                        if plugin.event_macro_game_prefix:
+                                            if cmd_lower.startswith("say "):
+                                                msg = cmd[4:].strip()
+                                                cmd = f'tellraw @a {json.dumps(plugin.event_macro_game_prefix + " " + msg)}'
+                                            elif cmd_lower.startswith("tell ") or cmd_lower.startswith("msg "):
+                                                parts = cmd.strip().split(" ", 2)
+                                                if len(parts) >= 3:
+                                                    target = parts[1]
+                                                    msg = parts[2]
+                                                    cmd = f'tellraw {target} {json.dumps(plugin.event_macro_game_prefix + " " + msg)}'
                                         try:
                                             resp = await _rcn_send(
                                                 conf["rcon_host"], int(conf["rcon_port"]),
                                                 conf["rcon_password"], cmd,
                                             )
                                             logger.info(f"[OnlineDur] 宏 '{macro.get('name','?')}' 触发: {player_name}({total_mins}min) -> {cmd} -> {resp[:80]}")
+                                            plugin._audit_auto("online_duration_macro", cmd, str(resp)[:500], True)
                                         except Exception as e:
                                             logger.warning(f"[OnlineDur] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
+                                            plugin._audit_auto("online_duration_macro", cmd, str(e)[:500], False)
                                     qq_msg = (macro.get("qq_message") or "").strip()
                                     if qq_msg:
-                                        qq_msg = qq_msg.replace("{player}", player_name).replace("{server}", srv_name)
+                                        qq_msg = qq_msg.replace("{player}", player_name).replace("{server}", srv_name).replace("{mc_id}", _mc_id).replace("{qq}", _qq_id)
                                         qq_msg = qq_msg.replace("{event_type}", "player_online_duration")
                                         try:
                                             await plugin._send_group_message(str(gid), qq_msg)

@@ -41,6 +41,7 @@ from .core.rate_limit import _ps_key as _core_ps_key
 from .core.audit import _audit as _core_audit
 from .core.audit import _audit_web as _core_audit_web
 from .core.audit import _audit_web_cmd as _core_audit_web_cmd
+from .core.audit import _audit_auto as _core_audit_auto
 
 from .core.rcon_executor import rcn_send as _core_rcn_send
 from .core.rcon_executor import transport_send as _core_transport_send
@@ -143,7 +144,7 @@ from .core.server_manager import cmd_onlinetime as _core_cmd_onlinetime
 from .core.online_tracker import cmd_tracker_set as _core_cmd_tracker_set
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "4.0.0")
+@register("mrcon", "lindagao", "MC 综合管理插件", "4.2.2")
 class MrconPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -311,6 +312,7 @@ class MrconPlugin(Star):
         self._trigger_cooldowns = {}
 
         self.plugin_data_dir = StarTools.get_data_dir("mrcon")
+        self._log_listener._positions_file = os.path.join(self.plugin_data_dir, "log_positions.json")
         _core_load_ranking_state(self)
         self.relay_overrides_path = os.path.join(self.plugin_data_dir, "relay_overrides.json")
         self._tracker_overrides = self._load_tracker_overrides()
@@ -328,6 +330,9 @@ class MrconPlugin(Star):
             self._save_event_macros_json()
         self.scripts_dir = os.path.join(self.plugin_data_dir, str(general_cfg.get("scripts_dir", "scripts") or "scripts"))
         self.audit_file = os.path.join(self.plugin_data_dir, "audit.log")
+        audit_cfg = self.config.get("audit", {})
+        self.audit_auto_enabled = bool(audit_cfg.get("auto_enabled", True))
+        self.audit_skip_categories = audit_cfg.get("skip_categories", []) or []
         self.pending_select = {}
         self.select_ttl = int(general_cfg.get("select_ttl", 30) or 30)
         self.rcn_persistent = bool(general_cfg.get("rcn_persistent", True))
@@ -776,6 +781,9 @@ class MrconPlugin(Star):
 
     def _audit_web_cmd(self, op: str, detail: str = "", ok: bool = True, operator: str = "web"):
         _core_audit_web_cmd(self, op, detail, ok, operator)
+
+    def _audit_auto(self, category: str, cmd: str, detail: str = "", ok: bool = True):
+        _core_audit_auto(self, category, cmd, detail, ok)
 
     def _match_dangerous(self, cmd: str) -> bool:
         return _core_match_dangerous(self, cmd)
