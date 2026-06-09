@@ -46,7 +46,7 @@ def _init_log_listeners(plugin):
                         seen.add(lp)
                         plugin._log_listener.add(sn, lp)
     if seen:
-        plugin._log_listener.start(_on_log_event)
+        plugin._log_listener.start(lambda *args: _on_log_event(plugin, *args))
     else:
         logger.warning("[mrcon] 日志监听已启用但无服务器配置 log_path，请在服务器管理中填写日志路径")
 

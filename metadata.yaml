@@ -1,6 +1,6 @@
 name: mrcon
 display_name: MRCon 综合管理
 desc: MC 综合管理插件 — RCON命令转发、服务器并发查询、SQLite/MySQL双引擎玩家数据库、在线会话追踪、签到、补偿、群服消息互联、日志监控、事件宏
-version: v4.1.0
+version: v4.1.1
 author: "[lindagao](https://github.com/rogergzl)"
 repo: https://github.com/rogergzl/astrbot_plugin_mrconop
