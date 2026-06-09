@@ -232,6 +232,7 @@ class MrconPlugin(Star):
         self._recent_log_events: dict[tuple, float] = {}
         self._tracker_overrides = {}
         self._pending_unbans = {}
+        self._banned_players: set = set()
 
         self.log_listener_enabled = bool(tracker_cfg.get("log_listener_enabled", False))
         self.online_history_max_bars = int(tracker_cfg.get("online_history_max_bars", 70) or 70)

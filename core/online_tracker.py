@@ -349,16 +349,30 @@ async def _online_tracker_loop(plugin):
                                 ub["conf"]["rcon_password"], f"pardon {ub['player']}",
                             )
                             logger.info(f"[mrcon] 自动解封 {ub['player']} @ {ub['conf'].get('server_name', '?')}")
+                            plugin._audit_web("auto_unban", f"玩家 {ub['player']} 在 {ub['conf'].get('server_name', '?')} 已自动解除封禁", True, "在线追踪")
                         except Exception:
                             pass
+                        plugin._banned_players.discard(key)
                         del plugin._pending_unbans[key]
                 for player in online:
                     sid = f"{srv_name}:{player}"
+                    ban_key = f"{srv_name}:{player}"
+                    if ban_key in plugin._banned_players:
+                        continue
                     if sid not in plugin._online_cache:
-                        plugin._online_cache[sid] = {
+                        cache_entry = {
                             "login_at": now, "player": player, "server": srv_name,
                             "gid": gid, "notified": set(), "kicked": False,
                         }
+                        init_mins = 0
+                        if tcfg.get("duration_mode", "session") == "cumulative":
+                            total_secs = plugin.db.get_player_total_seconds(player)
+                            init_mins += total_secs // 60
+                        if tcfg["notify"]:
+                            for threshold in tcfg["notify_intervals"]:
+                                if init_mins >= threshold:
+                                    cache_entry["notified"].add(threshold)
+                        plugin._online_cache[sid] = cache_entry
                         try:
                             plugin.db.save_online_state(srv_name, player, str(gid), now)
                         except Exception:
@@ -407,6 +421,7 @@ async def _online_tracker_loop(plugin):
                         cache["kicked"] = True
                         reason = tcfg["kick_reason"].replace("{player}", player)
                         kick_cmd = f"kick {player} {reason}"
+                        ban_key = f"{srv_name}:{player}"
                         try:
                             await _rcn_send(
                                 conf["rcon_host"], conf["rcon_port"],
@@ -417,22 +432,26 @@ async def _online_tracker_loop(plugin):
                                 plugin, str(gid), srv_name, player, dur_label, f"{tcfg['kick_threshold']}分钟",
                                 tcfg, is_kick=True
                             )
+                            plugin._audit_web("auto_kick", f"玩家 {player} 在 {srv_name} 因在线过久({tcfg['kick_threshold']}分钟)被自动踢出，原因: {reason}", True, "在线追踪")
                             ban_mins = tcfg["ban_minutes"]
                             if ban_mins > 0:
                                 await _rcn_send(
                                     conf["rcon_host"], conf["rcon_port"],
                                     conf["rcon_password"], f"ban {player} {reason}",
                                 )
-                                plugin._pending_unbans[f"{srv_name}:{player}"] = {
+                                plugin._pending_unbans[ban_key] = {
                                     "unban_at": now + ban_mins * 60,
                                     "player": player, "conf": conf,
                                 }
+                                plugin._banned_players.add(ban_key)
+                                plugin._audit_web("auto_ban", f"玩家 {player} 在 {srv_name} 被自动封禁 {ban_mins} 分钟，原因: {reason}", True, "在线追踪")
                         except Exception as e:
                             logger.error(f"[mrcon] 自动踢出失败: {e}")
                             await _send_tracker_notify(
                                 plugin, str(gid), srv_name, player, dur_label, f"{tcfg['kick_threshold']}分钟",
                                 tcfg, is_kick=True, error_msg=str(e)
                             )
+                            plugin._audit_web("auto_kick", f"玩家 {player} 在 {srv_name} 踢出失败: {e}", False, "在线追踪")
                 if plugin._event_macros:
                     for macro in plugin._event_macros:
                         if not macro.get("enabled", False):
