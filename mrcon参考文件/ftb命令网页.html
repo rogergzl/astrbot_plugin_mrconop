@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>FTB我的世界指令一键生成器【中文下拉优化版】</title>
+    <style>
+        *{box-sizing: border-box;margin:0;padding:0;font-family:Microsoft Yahei}
+        body{display:flex;flex-direction:column;padding:12px;gap:12px;background:#f5f5f5;min-height:100vh}
+        .top-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#fff;padding:10px;border-radius:8px;box-shadow:0 1px 5px #ddd}
+        .container-row{display:flex;gap:12px;flex:1}
+        .left{width:320px;background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 6px #ddd;overflow-y:auto}
+        .mid{flex:1;background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 6px #ddd;overflow-y:auto}
+        .right{width:360px;background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 6px #ddd;display:flex;flex-direction:column}
+        h3{margin-bottom:12px;color:#222;border-bottom:1px solid #eee;padding-bottom:6px;font-size:16px}
+        select,input{padding:8px;margin:6px 0;border:1px solid #ccc;border-radius:4px}
+        input{width:100%}
+        .required{color:red;font-weight:bold}
+        .cmd-preview{padding:12px;background:#222;color:#0f0;font-family:Consolas;min-height:120px;border-radius:6px;margin:10px 0;white-space:pre-wrap;flex:1}
+        button{padding:8px 12px;background:#2563eb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:4px}
+        button:hover{background:#1d4ed8}
+        .btn-red{background:#dc3545}
+        .btn-green{background:#28a745}
+        .remark-text{color:#555;margin:8px 0;padding:8px;background:#f8f8f8;border-radius:4px}
+        .color-box-wrap{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0}
+        .color-btn{width:26px;height:26px;border:1px solid #666;cursor:pointer;border-radius:3px}
+        .top-input{flex:1;min-width:220px}
+        .tab-btn-group{margin:8px 0}
+        .collect-item{padding:4px 6px;background:#eef;border-radius:3px;margin:3px;cursor:pointer}
+    </style>
+</head>
+<body>
+<!--顶部工具栏：搜索+筛选+导出+颜色面板开关-->
+<div class="top-bar">
+    <input class="top-input" id="searchInput" placeholder="🔍搜索模组/中文名称/命令/注释内容...">
+    <select id="authFilter">
+        <option value="all">全部权限</option>
+        <option value="Player">仅普通玩家</option>
+        <option value="OP">仅管理员OP</option>
+    </select>
+    <button id="exportExcel">📥导出全部指令Excel</button>
+    <button id="toggleColorPanel">🎨MC颜色代码面板</button>
+    <button id="toggleCollect">⭐打开收藏夹</button>
+</div>
+<!--MC颜色面板（默认隐藏）-->
+<div id="colorPanel" style="display:none;background:#fff;padding:10px;border-radius:8px">
+    <div class="color-box-wrap" id="colorWrap"></div>
+    <span>提示：点击颜色自动插入当前正在编辑的参数输入框（MC§彩色符号）</span>
+</div>
+<!--收藏面板（默认隐藏）-->
+<div id="collectPanel" style="display:none;background:#fff;padding:10px;border-radius:8px;margin-bottom:8px">
+    <h4>收藏指令列表 <button class="btn-red" id="clearAllCollect">清空全部收藏</button></h4>
+    <div id="collectList"></div>
+</div>
+
+<div class="container-row">
+    <div class="left">
+        <h3>1.选择模组与指令</h3>
+        <label>选择模组：</label>
+        <select id="modSelect"></select>
+        <label>选择命令：</label>
+        <select id="cmdSelect"></select>
+        <div style="margin-top:10px">
+            <span>权限：<span id="authTip"></span></span>
+            <div style="font-size:13px;color:#777;margin-top:4px">原始指令：<span id="originCmdText"></span></div>
+        </div>
+        <div class="tab-btn-group">
+            <button id="addCollect" class="btn-green">⭐收藏当前指令</button>
+        </div>
+    </div>
+    <div class="mid">
+        <h3>2.填写参数（*为必填）</h3>
+        <div id="paramBox"></div>
+        <div class="remark-text"><b>指令注释：</b><span id="remarkBox"></span></div>
+    </div>
+    <div class="right">
+        <h3>3.生成指令结果</h3>
+        <div class="cmd-preview" id="resultCmd"></div>
+        <button id="copyBtn">一键复制指令</button>
+    </div>
+</div>
+
+<script>
+// 【关键改动】每条增加showName：下拉显示中文名称，内部cmd保留原版指令
+const allCmd = [
+    {"modName":"FTB Essentials","cmd":"/back","showName":"返回上次位置｜回到死亡/传送前坐标","params":[],"auth":"Player","remark":"返回上一次死亡/传送坐标，无参数"},
+    {"modName":"FTB Essentials","cmd":"/spawn","showName":"传送出生点｜回到世界出生坐标","params":[],"auth":"Player","remark":"传送至世界出生点"},
+    {"modName":"FTB Essentials","cmd":"/rtp","showName":"随机传送｜野外安全随机瞬移","params":[{"name":"radius","type":"数字","required":false,"desc":"随机传送半径，不填使用配置默认值"}],"auth":"Player","remark":"随机安全传送至野外，避开深海岩浆"},
+    {"modName":"FTB Essentials","cmd":"/home","showName":"回家｜传送至已保存家点位","params":[{"name":"homeName","type":"文本","required":false,"desc":"家点位名称，空=默认主家"}],"auth":"Player","remark":"传送至指定/home默认存档点"},
+    {"modName":"FTB Essentials","cmd":"/sethome","showName":"设置家｜在当前坐标存家","params":[{"name":"homeName","type":"文本","required":true,"desc":"自定义家名称，不可重名"}],"auth":"Player","remark":"在当前坐标新建家存档"},
+    {"modName":"FTB Essentials","cmd":"/delhome","showName":"删除家｜移除已保存家坐标","params":[{"name":"homeName","type":"文本","required":true,"desc":"待删除的家名称"}],"auth":"Player","remark":"删除已保存的家点位"},
+    {"modName":"FTB Essentials","cmd":"/listhomes","showName":"查看家列表｜列出全部存档家","params":[{"name":"player","type":"文本","required":false,"desc":"玩家ID，空=查询自己的家"}],"auth":"Player","remark":"查看玩家全部已存家列表"},
+    {"modName":"FTB Essentials","cmd":"/tpa","showName":"申请传送到对方｜向玩家发起TP请求","params":[{"name":"target","type":"文本","required":true,"desc":"目标玩家游戏ID"}],"auth":"Player","remark":"发起传送至对方请求，需对方确认"},
+    {"modName":"FTB Essentials","cmd":"/tpahere","showName":"邀请玩家过来｜让对方传送至自己身边","params":[{"name":"target","type":"文本","required":true,"desc":"目标玩家游戏ID"}],"auth":"Player","remark":"邀请对方传送至自己身边"},
+    {"modName":"FTB Essentials","cmd":"/tpaccept","showName":"同意传送｜确认对方TP申请","params":[{"name":"reqId","type":"数字","required":false,"desc":"传送请求编号，空=接受最新请求"}],"auth":"Player","remark":"同意传送申请"},
+    {"modName":"FTB Essentials","cmd":"/tpdeny","showName":"拒绝传送｜驳回对方TP申请","params":[{"name":"reqId","type":"数字","required":false,"desc":"传送请求编号，空=拒绝最新请求"}],"auth":"Player","remark":"拒绝传送申请"},
+    {"modName":"FTB Essentials","cmd":"/hat","showName":"物品戴头上｜手持物品变头盔","params":[],"auth":"Player","remark":"手持物品佩戴为头盔装饰"},
+    {"modName":"FTB Essentials","cmd":"/nick","showName":"修改昵称｜自定义聊天显示名字","params":[{"name":"nickName","type":"文本","required":true,"desc":"自定义聊天昵称，支持彩色符号"}],"auth":"Player","remark":"修改自身聊天显示昵称"},
+    {"modName":"FTB Essentials","cmd":"/crafting","showName":"远程工作台｜原地打开合成台","params":[],"auth":"Player","remark":"远程打开工作台界面"},
+    {"modName":"FTB Essentials","cmd":"/anvil","showName":"远程铁砧｜原地打开铁砧界面","params":[],"auth":"Player","remark":"远程打开铁砧界面"},
+    {"modName":"FTB Essentials","cmd":"/heal","showName":"满血恢复｜OP给自己/玩家回满状态","params":[{"name":"player","type":"文本","required":false,"desc":"指定玩家ID，空=给自己回血"}],"auth":"OP","remark":"回满生命值与饥饿值，OP专用"},
+    {"modName":"FTB Essentials","cmd":"/fly","showName":"切换飞行｜OP开关飞行模式","params":[{"name":"player","type":"文本","required":false,"desc":"指定玩家ID，空=切换自身飞行"}],"auth":"OP","remark":"开启/关闭创造飞行模式"},
+    {"modName":"FTB Essentials","cmd":"/invsee","showName":"查看背包｜OP打开他人背包","params":[{"name":"target","type":"文本","required":true,"desc":"目标玩家ID"}],"auth":"OP","remark":"打开目标玩家背包查看编辑"},
+    {"modName":"FTB Essentials","cmd":"/mute","showName":"禁言玩家｜封禁聊天权限","params":[{"name":"target","type":"文本","required":true,"desc":"禁言玩家ID"},{"name":"time","type":"数字","required":false,"desc":"禁言时长(分钟)，空永久禁言"}],"auth":"OP","remark":"封禁玩家聊天权限"},
+    {"modName":"FTB Essentials","cmd":"/unmute","showName":"解除禁言｜恢复玩家发言","params":[{"name":"target","type":"text","required":true,"desc":"解除禁言玩家ID"}],"auth":"OP","remark":"取消玩家禁言限制"},
+    {"modName":"FTB Teams","cmd":"/ftbteams list","showName":"查看全服队伍｜列出所有团队","params":[{"name":"type","type":"下拉","required":false,"desc":"可选:all/party/server，空默认全部队伍"}],"auth":"Player","remark":"列出服务器所有团队"},
+    {"modName":"FTB Teams","cmd":"/ftbteams info","showName":"队伍信息｜查看自己/指定队伍详情","params":[{"name":"teamName","type":"文本","required":false,"desc":"队伍名称，空查看自己所在队伍"}],"auth":"Player","remark":"查看队伍成员、权限、盟友信息"},
+    {"modName":"FTB Teams","cmd":"/ftbteams msg","showName":"队伍频道发言｜队内发消息","params":[{"name":"msg","type":"文本","required":true,"desc":"队伍频道发送的消息内容"}],"auth":"Player","remark":"发送队伍内部频道消息"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party create","showName":"创建小队｜新建私人队伍","params":[{"name":"partyName","type":"文本","required":true,"desc":"新建队伍名称"}],"auth":"Player","remark":"创建私人小队队伍"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party invite","showName":"邀请入队｜拉玩家进小队","params":[{"name":"target","type":"文本","required":true,"desc":"受邀玩家ID"}],"auth":"Player","remark":"邀请玩家加入自己队伍"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party kick","showName":"踢出队员｜队长移除队内成员","params":[{"name":"target","type":"text","required":true,"desc":"被踢出队员ID"}],"auth":"Player","remark":"队长踢出队内成员"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party leave","showName":"退出队伍｜主动离开当前小队","params":[],"auth":"Player","remark":"主动退出当前所在队伍"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party transfer_ownership","showName":"转让队长｜移交队伍管理权","params":[{"name":"target","type":"text","required":true,"desc":"新任队长ID"}],"auth":"Player","remark":"队伍转让队长权限"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party allies add","showName":"队伍结盟｜和其他小队建盟友","params":[{"name":"team","type":"text","required":true,"desc":"结盟目标队伍名"}],"auth":"Player","remark":"和指定队伍建立盟友关系"},
+    {"modName":"FTB Teams","cmd":"/ftbteams party allies remove","showName":"取消结盟｜解除队伍盟友关系","params":[{"name":"team","type":"text","required":true,"desc":"取消结盟队伍名称"}],"auth":"Player","remark":"解除已有盟友关系"},
+    {"modName":"FTB Teams","cmd":"/ftbteams server create","showName":"创建公共队｜OP创建全服公共队伍","params":[{"name":"teamName","type":"text","required":true,"desc":"服务器公共队伍名称"}],"auth":"OP","remark":"OP创建全服公共队伍"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks claim","showName":"认领区块｜脚下领地私有化","params":[],"auth":"Player","remark":"认领脚下当前区块为私人领地"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks unclaim","showName":"取消领地｜放弃当前区块认领","params":[],"auth":"Player","remark":"取消脚下区块领地认领"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks unclaim_all","showName":"清空全领地｜一键取消所有认领","params":[{"name":"dimID","type":"数字","required":false,"desc":"维度ID(0主世界/-1下界/1末地)，空全维度取消"}],"auth":"Player","remark":"清空自身全部领地区块"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks load","showName":"区块常驻加载｜离线也运行地块","params":[],"auth":"Player","remark":"开启当前区块常驻加载（玩家离线区块也运行）"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks unload","showName":"关闭区块加载｜取消地块常驻","params":[],"auth":"Player","remark":"关闭区块常驻加载"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks info","showName":"查询领地归属｜查看当前区块是谁的","params":[],"auth":"Player","remark":"查询当前区块归属玩家/队伍"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks waypoint add","showName":"添加路标｜地图标记坐标点位","params":[{"name":"wpName","type":"文本","required":true,"desc":"路标名称"},{"name":"x","type":"数字","required":true,"desc":"X坐标"},{"name":"y","type":"数字","required":true,"desc":"Y坐标"},{"name":"z","type":"数字","required":true,"desc":"Z坐标"},{"name":"dim","type":"数字","required":true,"desc":"维度ID"},{"name":"color","type":"下拉","required":true,"desc":"路标颜色(red/green/blue/yellow)"}],"auth":"Player","remark":"在指定坐标创建地图路标"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks admin bypass_protection","showName":"OP穿透领地｜无视所有领地保护","params":[],"auth":"OP","remark":"OP开启领地穿透，无视所有玩家领地保护"},
+    {"modName":"FTB Chunks","cmd":"/ftbchunks admin extra_claim_chunks","showName":"修改领地上限｜调整玩家可圈地块数量","params":[{"name":"player","type":"文本","required":true,"desc":"目标玩家ID"},{"name":"opt","type":"下拉","required":true,"desc":"操作:add/set/get"},{"name":"num","type":"数字","required":true,"desc":"增减/设置领地上限数量"}],"auth":"OP","remark":"修改玩家可认领区块上限数量"},
+    {"modName":"FTB Quests","cmd":"/ftbquests open_book","showName":"打开任务书｜跳转指定任务","params":[{"name":"questID","type":"数字","required":false,"desc":"任务ID，空直接打开任务手册首页"}],"auth":"Player","remark":"直接打开任务书，跳转指定任务"},
+    {"modName":"FTB Quests","cmd":"/ftbquests block_rewards","showName":"禁用任务奖励｜OP开关领奖权限","params":[{"name":"bool","type":"下拉","required":true,"desc":"true禁止/false允许领奖"},{"name":"player","type":"文本","required":false,"desc":"指定玩家，空全服生效"}],"auth":"OP","remark":"全局开关是否可领取任务奖励"},
+    {"modName":"FTB Quests","cmd":"/ftbquests change_progress","showName":"修改任务进度｜一键完成/重置任务","params":[{"name":"player","type":"text","required":true,"desc":"目标玩家ID"},{"name":"opt","type":"下拉","required":true,"desc":"操作:reset/complete/reset-all/complete-all"},{"name":"qid","type":"数字","required":false,"desc":"单个任务ID，all参数时留空"}],"auth":"OP","remark":"一键完成/重置玩家单个/全部任务进度"},
+    {"modName":"FTB Ultimine","cmd":"/ftbultimine clientconfig","showName":"玩家连锁挖矿设置｜本地配置连锁","params":[],"auth":"Player","remark":"玩家本地打开连锁挖矿配置面板"},
+    {"modName":"FTB Ultimine","cmd":"/ftbultimine serverconfig","showName":"全局连锁配置｜OP修改服务器连锁规则","params":[],"auth":"OP","remark":"OP修改服务器全局连锁挖矿规则(最大挖掘数量、饥饿消耗)"},
+    {"modName":"FTB Lib","cmd":"/ftb_worldID","showName":"查看世界ID｜获取当前世界唯一标识","params":[],"auth":"Player","remark":"查看当前所在世界唯一UUID"},
+    {"modName":"FTB Lib","cmd":"/ftb_mode set","showName":"修改世界模式｜切换生存/创造等","params":[{"name":"mode","type":"文本","required":true,"desc":"世界模式ID(survival/creative等)"}],"auth":"OP","remark":"修改当前世界游玩模式"},
+    {"modName":"FTB Lib","cmd":"/set_item_name","showName":"自定义物品名｜修改手持物品显示名称","params":[{"name":"itemName","type":"文本","required":true,"desc":"手持物品自定义名称，支持格式符"}],"auth":"OP","remark":"修改手持物品自定义显示名称"}
+];
+
+// MC原版颜色码 §+代码
+const mcColorList = [
+    {code:"§0",bg:"#000000"},{code:"§1",bg:"#0000AA"},{code:"§2",bg:"#00AA00"},{code:"§3",bg:"#00AAAA"},
+    {code:"§4",bg:"#AA0000"},{code:"§5",bg:"#AA00AA"},{code:"§6",bg:"#FFAA00"},{code:"§7",bg:"#AAAAAA"},
+    {code:"§8",bg:"#555555"},{code:"§9",bg:"#5555FF"},{code:"§a",bg:"#55FF55"},{code:"§b",bg:"#55FFFF"},
+    {code:"§c",bg:"#FF5555"},{code:"§d",bg:"#FF55FF"},{code:"§e",bg:"#FFFF55"},{code:"§f",bg:"#FFFFFF"},
+    {code:"§l",bg:"#888888",text:"加粗"},{code:"§o",bg:"#999999",text:"斜体"},{code:"§n",bg:"#aaa",text:"下划线"},{code:"§m",bg:"#bbb",text:"删除线"}
+]
+
+// 全局变量
+let collectArr = JSON.parse(localStorage.getItem('ftbCollect')||'[]'); //本地存储收藏
+let nowFocusInput = null; //当前激活的输入框
+let filterCmd = [...allCmd]; //筛选后的指令
+
+// dom元素
+const modSel = document.getElementById('modSelect');
+const cmdSel = document.getElementById('cmdSelect');
+const paramBox = document.getElementById('paramBox');
+const resBox = document.getElementById('resultCmd');
+const authTip = document.getElementById('authTip');
+const originCmdText = document.getElementById('originCmdText'); //新增：展示原始指令
+const remarkBox = document.getElementById('remarkBox');
+const copyBtn = document.getElementById('copyBtn');
+const searchInput = document.getElementById('searchInput');
+const authFilter = document.getElementById('authFilter');
+const exportExcel = document.getElementById('exportExcel');
+const toggleColorPanel = document.getElementById('toggleColorPanel');
+const colorPanel = document.getElementById('colorPanel');
+const colorWrap = document.getElementById('colorWrap');
+const toggleCollect = document.getElementById('toggleCollect');
+const collectPanel = document.getElementById('collectPanel');
+const collectList = document.getElementById('collectList');
+const addCollect = document.getElementById('addCollect');
+const clearAllCollect = document.getElementById('clearAllCollect');
+
+// 初始化MC颜色按钮
+function initColorBtn(){
+    colorWrap.innerHTML = '';
+    mcColorList.forEach(item=>{
+        let div = document.createElement('div');
+        div.className = 'color-btn';
+        div.style.background = item.bg;
+        div.title = item.code + (item.text||'颜色');
+        div.dataset.code = item.code;
+        div.onclick = ()=>{
+            if(nowFocusInput){
+                let pos = nowFocusInput.selectionStart;
+                let val = nowFocusInput.value;
+                nowFocusInput.value = val.slice(0,pos)+item.code+val.slice(pos);
+                buildCmd();
+            }else{
+                alert('请先点击一个参数输入框，再插入颜色码！')
+            }
+        }
+        colorWrap.appendChild(div);
+    })
+}
+initColorBtn();
+
+// 刷新模组下拉+指令下拉【重点：option显示showName中文，value存json】
+function refreshModAndCmd(){
+    let modList = [...new Set(filterCmd.map(v=>v.modName))];
+    modSel.innerHTML = '';
+    modList.forEach(m=>{
+        let op = document.createElement('option');
+        op.innerText = m;op.value=m;
+        modSel.appendChild(op);
+    })
+    modSel.dispatchEvent(new Event('change'))
+}
+
+// 筛选指令（搜索支持搜中文showName、原cmd、模组、备注）
+function filterCommand(){
+    let key = searchInput.value.trim().toLowerCase();
+    let authVal = authFilter.value;
+    filterCmd = allCmd.filter(item=>{
+        let matchSearch = item.cmd.toLowerCase().includes(key)
+            ||item.modName.toLowerCase().includes(key)
+            ||item.remark.toLowerCase().includes(key)
+            ||item.showName.toLowerCase().includes(key); //支持中文搜索
+        let matchAuth = authVal==='all'||item.auth===authVal;
+        return matchSearch&&matchAuth;
+    })
+    refreshModAndCmd();
+}
+
+// 切换模组刷新命令
+modSel.onchange = ()=>{
+    let curMod = modSel.value;
+    let filterModCmd = filterCmd.filter(v=>v.modName===curMod);
+    cmdSel.innerHTML = '';
+    filterModCmd.forEach(c=>{
+        let op = document.createElement('option');
+        op.innerText = c.showName; //下拉只展示中文注释名称
+        op.value = JSON.stringify(c); //值内部完整保存原始数据
+        cmdSel.appendChild(op);
+    })
+    cmdSel.dispatchEvent(new Event('change'))
+}
+
+// 切换指令生成参数框
+cmdSel.onchange = ()=>{
+    let data = JSON.parse(cmdSel.value);
+    authTip.innerText = data.auth==='OP'?'管理员OP':'普通玩家可用';
+    originCmdText.innerText = data.cmd; //左侧显示原始英文指令
+    remarkBox.innerText = data.remark;
+    paramBox.innerHTML = '';
+    // 渲染参数
+    data.params.forEach(p=>{
+        let lab = document.createElement('label');
+        lab.innerHTML = `${p.name} ${p.required?'<span class="required">*</span>':''}：${p.desc}`;
+        let inp = document.createElement('input');
+        inp.dataset.key = p.name;
+        inp.placeholder = `输入${p.type}`;
+        // 监听输入框聚焦，用于颜色插入
+        inp.onfocus = ()=> nowFocusInput = inp;
+        inp.oninput = buildCmd;
+        paramBox.appendChild(lab);
+        paramBox.appendChild(inp);
+    })
+    buildCmd();
+}
+
+// 拼接指令（仍然使用原始cmd生成，不受中文下拉影响）
+function buildCmd(){
+    let data = JSON.parse(cmdSel.value);
+    let base = data.cmd;
+    let inputs = paramBox.querySelectorAll('input');
+    inputs.forEach(inp=>{
+        let val = inp.value.trim();
+        if(val) base += ' '+val;
+    })
+    resBox.innerText = base;
+}
+
+// 复制按钮
+copyBtn.onclick = async ()=>{
+    await navigator.clipboard.writeText(resBox.innerText);
+    alert('指令已复制剪贴板！')
+}
+
+// 搜索&筛选绑定事件
+searchInput.oninput = filterCommand;
+authFilter.onchange = filterCommand;
+
+// 颜色面板显示隐藏
+toggleColorPanel.onclick = ()=>{
+    colorPanel.style.display = colorPanel.style.display==='none'?'block':'none'
+}
+
+// =====收藏相关=====
+// 刷新收藏列表
+function renderCollect(){
+    collectList.innerHTML = '';
+    collectArr.forEach((item,idx)=>{
+        let div = document.createElement('div');
+        div.className = 'collect-item';
+        div.innerText = `${item.showName}｜【${item.auth}】${item.cmd}`;
+        //点击选中收藏指令
+        div.onclick = ()=>{
+            searchInput.value = item.showName;
+            filterCommand();
+            setTimeout(()=>{
+                //自动选中这条指令
+                for(let opt of cmdSel.options){
+                    let optData = JSON.parse(opt.value);
+                    if(optData.cmd===item.cmd){opt.selected=true;cmdSel.dispatchEvent(new Event('change'));break}
+                }
+            },100)
+        }
+        //右键删除单条收藏
+        div.oncontextmenu=(e)=>{
+            e.preventDefault();
+            collectArr.splice(idx,1);
+            localStorage.setItem('ftbCollect',JSON.stringify(collectArr));
+            renderCollect();
+        }
+    })
+}
+renderCollect();
+
+//打开关闭收藏面板
+toggleCollect.onclick = ()=>{
+    collectPanel.style.display = collectPanel.style.display==='none'?'block':'none'
+}
+//添加当前指令到收藏
+addCollect.onclick = ()=>{
+    let curCmdData = JSON.parse(cmdSel.value);
+    let isExist = collectArr.find(i=>i.cmd===curCmdData.cmd);
+    if(isExist){alert('该指令已经在收藏夹中！');return}
+    collectArr.push(curCmdData);
+    localStorage.setItem('ftbCollect',JSON.stringify(collectArr));
+    renderCollect();
+    alert('收藏成功！');
+}
+//清空全部收藏
+clearAllCollect.onclick = ()=>{
+    if(!confirm('确定清空所有收藏指令？'))return;
+    collectArr=[];
+    localStorage.setItem('ftbCollect','[]');
+    renderCollect();
+}
+
+// =====导出Excel（CSV，Excel直接打开）=====
+exportExcel.onclick = ()=>{
+    //组装csv表头+数据
+    let csv = '模组名称,中文别名,原始指令,权限,指令备注,参数信息\n';
+    allCmd.forEach(item=>{
+        let paramStr = item.params.map(p=>`${p.name}(${p.type},${p.required?'必填':'选填'}):${p.desc}`).join('|');
+        csv += `"${item.modName}","${item.showName}","${item.cmd}","${item.auth}","${item.remark}","${paramStr}"\n`
+    })
+    //下载文件
+    let blob = new Blob([csv],{type:'text/csv;charset=utf-8'});
+    let a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'FTB全指令清单.csv';
+    a.click();
+}
+
+// 初始化加载
+filterCommand();
+</script>
+</body>
+</html>

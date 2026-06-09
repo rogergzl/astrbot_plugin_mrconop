@@ -1,0 +1,77 @@
+version 3465
+[08Jun2026 11:30:00.349] [FTB Backups backup thread 0/INFO] [net.creeperhost.levelio.loader.SaveInfo/]: Save Name: world
+[08Jun2026 11:30:00.365] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.data.Level/]: Did not find a region folder for level: /root/mc/lzmx/./world/./DIM1
+[08Jun2026 11:30:00.367] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.loader.LevelLoader/]: Found possible mod dimension with no region folder iceandfire:dread_land
+[08Jun2026 11:30:00.368] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.loader.LevelLoader/]: Found possible mod dimension with no region folder graveyard:past
+[08Jun2026 11:30:02.942] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Backup preview created, Scan took 1595ms, Capture took 1051ms
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:overworld save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_end save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world iceandfire:dread_land save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world petconnect:petconnect save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world graveyard:past save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world twilightforest:twilight_forest save state to false
+[08Jun2026 11:30:26.197] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_nether save state to false
+[08Jun2026 11:30:26.811] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Backup size 953.7MB World Size 1.2GB
+[08Jun2026 11:30:26.812] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Writing to file /root/mc/lzmx/backups/backups.json
+[08Jun2026 11:30:26.813] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: New backup created at /root/mc/lzmx/backups/2026-6-8_11-30-0.zip size: 953.7MB Took: 0m, 26s, 82ms Sha1: f7dda823202ffc1343fc2972dc086cec22b3efb4
+[08Jun2026 11:30:36.501] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: More backups than 5 found, Removing oldest backup
+[08Jun2026 11:30:36.657] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Removed old backup 2026-6-7_21-30-0.zip
+[08Jun2026 11:30:36.657] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: File missing, removing from backups /root/mc/lzmx/backups/2026-6-7_21-30-0.zip
+[08Jun2026 11:30:36.657] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Writing to file /root/mc/lzmx/backups/backups.json
+[08Jun2026 11:33:12.453] [RCON Client /172.18.0.6 #230/INFO] [net.minecraft.server.rcon.thread.RconClient/]: Thread RCON Client /172.18.0.6 shutting down
+[08Jun2026 11:33:42.975] [Server thread/INFO] [net.minecraft.server.network.ServerGamePacketListenerImpl/]: ac9949 lost connection: You have been idle for too long!
+[08Jun2026 11:33:42.975] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ac9949 left the game
+[08Jun2026 11:35:09.583] [User Authenticator #19/INFO] [net.minecraft.server.network.ServerLoginPacketListenerImpl/]: UUID of player ac9949 is 78594445-f34e-4b56-978b-51e00b17e3ed
+[08Jun2026 11:35:12.276] [Server thread/INFO] [net.minecraft.server.players.PlayerList/]: ac9949[/192.168.31.81:5829] logged in with entity id 762700 at (59.19573339387569, 269.5625, 20.08849891361498)
+[08Jun2026 11:35:12.294] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: ac9949 joined the game
+[08Jun2026 11:35:12.350] [Server thread/INFO] [se.mickelus.tetra.data.DataManager/]: Sending data to client: ac9949
+[08Jun2026 11:35:12.355] [Server thread/INFO] [Jade/]: Syncing config to ac9949 (78594445-f34e-4b56-978b-51e00b17e3ed)
+[08Jun2026 11:35:12.355] [Server thread/INFO] [Enigmatic Legacy/INFO]: Synchronizing omniconfig files to ac9949...
+[08Jun2026 11:35:12.355] [Server thread/INFO] [Enigmatic Legacy/INFO]: Sending data for enigmaticaddons-common.omniconf
+[08Jun2026 11:35:12.355] [Server thread/INFO] [Enigmatic Legacy/INFO]: Sending data for enigmaticlegacy-common.omniconf
+[08Jun2026 11:35:12.355] [Server thread/INFO] [Enigmatic Legacy/INFO]: Sending data for enigmaticdelicacy-common.omniconf
+[08Jun2026 11:35:12.356] [Server thread/INFO] [Enigmatic Legacy/INFO]: Granting starter gear to ac9949
+[08Jun2026 11:35:47.933] [RCON Listener #1/INFO] [net.minecraft.server.rcon.thread.GenericThread/]: Thread RCON Client /172.18.0.6 started
+[08Jun2026 11:36:04.382] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <ac9949> 你好你好
+[08Jun2026 11:36:42.170] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <ac9949> 你好
+[08Jun2026 11:48:09.322] [RCON Client /172.18.0.6 #231/INFO] [net.minecraft.server.rcon.thread.RconClient/]: Thread RCON Client /172.18.0.6 shutting down
+[08Jun2026 11:48:31.821] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <ac9949> 你好
+[08Jun2026 11:49:16.052] [RCON Listener #1/INFO] [net.minecraft.server.rcon.thread.GenericThread/]: Thread RCON Client /172.18.0.6 started
+[08Jun2026 12:00:00.000] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Attempting to create an automatic backup
+[08Jun2026 12:00:00.000] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Found world folder at /root/mc/lzmx/./world/.
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Last backup size: 953.7MB Current world size: 1.2GB Current Available space: 816.7GB ExpectedSize 1001.4MB
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:overworld save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_end save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world iceandfire:dread_land save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world petconnect:petconnect save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world graveyard:past save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world twilightforest:twilight_forest save state to true
+[08Jun2026 12:00:00.118] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_nether save state to true
+[08Jun2026 12:00:00.119] [ftbbackups2_Worker-1/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Writing to file /root/mc/lzmx/backups/backups.json
+[08Jun2026 12:00:00.120] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Waiting for world save to complete.
+[08Jun2026 12:00:00.338] [FTB Backups backup thread 0/INFO] [net.creeperhost.levelio.loader.SaveInfo/]: Detected MC Version 1.20.1, Data version 3465
+[08Jun2026 12:00:00.338] [FTB Backups backup thread 0/INFO] [net.creeperhost.levelio.loader.SaveInfo/]: Save Name: world
+[08Jun2026 12:00:00.354] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.data.Level/]: Did not find a region folder for level: /root/mc/lzmx/./world/./DIM1
+[08Jun2026 12:00:00.356] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.loader.LevelLoader/]: Found possible mod dimension with no region folder iceandfire:dread_land
+[08Jun2026 12:00:00.358] [FTB Backups backup thread 0/WARN] [net.creeperhost.levelio.loader.LevelLoader/]: Found possible mod dimension with no region folder graveyard:past
+[08Jun2026 12:00:02.942] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Backup preview created, Scan took 1602ms, Capture took 1056ms
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:overworld save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_end save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world iceandfire:dread_land save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world petconnect:petconnect save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world graveyard:past save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world twilightforest:twilight_forest save state to false
+[08Jun2026 12:00:26.598] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Setting world minecraft:the_nether save state to false
+[08Jun2026 12:00:27.208] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Backup size 953.7MB World Size 1.2GB
+[08Jun2026 12:00:27.209] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Writing to file /root/mc/lzmx/backups/backups.json
+[08Jun2026 12:00:27.210] [FTB Backups backup thread 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: New backup created at /root/mc/lzmx/backups/2026-6-8_12-0-0.zip size: 953.7MB Took: 0m, 26s, 480ms Sha1: 046796c95af845068f798b5b0c2b2d38297d9bde
+[08Jun2026 12:00:36.501] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: More backups than 5 found, Removing oldest backup
+[08Jun2026 12:00:36.660] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Removed old backup 2026-6-8_1-0-0.zip
+[08Jun2026 12:00:36.660] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: File missing, removing from backups /root/mc/lzmx/backups/2026-6-8_1-0-0.zip
+[08Jun2026 12:00:36.661] [FTB Backups scheduled executor 0/INFO] [net.creeperhost.ftbbackups.FTBBackups/]: Writing to file /root/mc/lzmx/backups/backups.json
+[08Jun2026 12:04:46.654] [RCON Client /172.18.0.6 #232/INFO] [net.minecraft.server.rcon.thread.RconClient/]: Thread RCON Client /172.18.0.6 shutting down
+[08Jun2026 12:05:34.370] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <ac9949> 你好
+[08Jun2026 12:05:53.145] [RCON Listener #1/INFO] [net.minecraft.server.rcon.thread.GenericThread/]: Thread RCON Client /172.18.0.6 started
+[08Jun2026 12:11:33.797] [RCON Client /172.18.0.6 #233/INFO] [net.minecraft.server.rcon.thread.RconClient/]: Thread RCON Client /172.18.0.6 shutting down
+[08Jun2026 12:11:56.123] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: <ac9949> 你好
+[08Jun2026 12:12:40.148] [RCON Listener #1/INFO] [net.minecraft.server.rcon.thread.GenericThread/]: Thread RCON Client /172.18.0.6 started
