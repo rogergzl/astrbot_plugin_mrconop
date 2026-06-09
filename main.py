@@ -142,7 +142,7 @@ from .core.server_manager import cmd_onlinetime as _core_cmd_onlinetime
 from .core.online_tracker import cmd_tracker_set as _core_cmd_tracker_set
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "3.46.7")
+@register("mrcon", "lindagao", "MC 综合管理插件", "3.47.0")
 class MrconPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -657,7 +657,9 @@ class MrconPlugin(Star):
         self.db_path = os.path.join(self.plugin_data_dir, "mrcon.db")
         self.db = Database(self.db_path)
         self.db.set_storage_mode(self.online_db_storage_mode, self.online_db_read_source)
-        if self.online_db_storage_mode in ("external", "dual") and self.online_db_ext_path:
+        if self.online_db_storage_mode in ("external", "dual") and (
+            self.online_db_ext_path or self.online_db_ext_type == "mysql"
+        ):
             self.db.configure_external(
                 ext_type=self.online_db_ext_type,
                 host=self.online_db_ext_host,

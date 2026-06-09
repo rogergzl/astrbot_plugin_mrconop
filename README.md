@@ -1,12 +1,12 @@
 # mrcon — MC 综合管理插件
 
 [![GitHub](https://img.shields.io/badge/GitHub-rogergzl%2Fastrbot__plugin__mrconop-blue?logo=github)](https://github.com/rogergzl/astrbot_plugin_mrconop)
-![Version](https://img.shields.io/badge/version-v3.34.20-green)
+![Version](https://img.shields.io/badge/version-v3.47.0-green)
 ![Author](https://img.shields.io/badge/author-lindagao-orange)
 
 > **作者**: [lindagao](https://github.com/rogergzl) · **仓库**: [astrbot_plugin_mrconop](https://github.com/rogergzl/astrbot_plugin_mrconop)
 
-RCON 命令转发 + 服务器并发查询 + SQLite 玩家数据库 + 在线追踪 + 签到 + 补偿 + 积分兑换 + 抽奖 + 群服消息互联（RCON tellraw + 日志监听）
+RCON 命令转发 + 服务器并发查询 + SQLite/MySQL 双引擎玩家数据库 + 在线追踪 + 签到 + 补偿 + 积分兑换 + 抽奖 + 群服消息互联（RCON tellraw + 日志监听）
 
 ## 安装
 

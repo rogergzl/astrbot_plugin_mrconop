@@ -27,9 +27,18 @@ class Database:
             except Exception as e:
                 logger.error(f"[mrcon] 外部数据库连接失败: {e}")
                 self._ext_db = None
-        # MySQL/PostgreSQL 预留接口
-        elif ext_type in ("mysql", "postgresql") and host and database:
-            logger.info(f"[mrcon] 外部数据库类型 {ext_type} 预留，当前仅支持外部 SQLite")
+        elif ext_type == "mysql" and host and database:
+            try:
+                self._ext_db = ExternalMySQLDB(
+                    host=host, port=int(port) if port else 3306,
+                    user=user, password=password, database=database,
+                )
+                logger.info(f"[mrcon] 外部数据库已配置: mysql -> {host}:{port}/{database}")
+            except Exception as e:
+                logger.error(f"[mrcon] 外部 MySQL 数据库连接失败: {e}")
+                self._ext_db = None
+        elif ext_type == "postgresql" and host and database:
+            logger.info(f"[mrcon] 外部数据库类型 postgresql 预留，当前仅支持 SQLite/MySQL")
             self._ext_db = None
 
     def set_storage_mode(self, storage_mode: str, read_source: str = "local"):
@@ -370,6 +379,11 @@ class Database:
                 conn.close()
 
     def add_online_session(self, server: str, player: str, start_ts: int, end_ts: int):
+        targets = self._get_target_db(for_write=True)
+        for db in targets:
+            db._add_online_session_impl(server, player, start_ts, end_ts)
+
+    def _add_online_session_impl(self, server: str, player: str, start_ts: int, end_ts: int):
         with self._lock:
             conn = self._connect()
             try:
@@ -616,13 +630,173 @@ class Database:
             finally:
                 conn.close()
 
+
+class ExternalMySQLDB:
+    """外部 MySQL 数据库，提供与 ExternalSQLiteDB 同构的接口"""
+
+    def __init__(self, host: str, port: int, user: str, password: str, database: str):
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._database = database
+        self._lock = threading.RLock()
+        self._ensure_schema()
+
+    def _connect(self):
+        import pymysql
+        conn = pymysql.connect(
+            host=self._host,
+            port=self._port,
+            user=self._user,
+            password=self._password,
+            database=self._database,
+            charset='utf8mb4',
+            autocommit=False,
+        )
+        return conn
+
+    def _ensure_schema(self):
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS online_state (
+                        server_name VARCHAR(255) NOT NULL,
+                        player_name VARCHAR(255) NOT NULL,
+                        gid VARCHAR(64) DEFAULT '',
+                        login_at BIGINT NOT NULL,
+                        UNIQUE KEY uk_srv_player (server_name, player_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS online_sessions (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        server_name VARCHAR(255) NOT NULL,
+                        player_name VARCHAR(255) NOT NULL,
+                        start_ts BIGINT NOT NULL,
+                        end_ts BIGINT NOT NULL,
+                        INDEX idx_player_srv (player_name, server_name, start_ts)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _save_online_state_impl(self, server_name: str, player_name: str, gid: str, login_at: int):
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO online_state (server_name, player_name, gid, login_at) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE gid=VALUES(gid), login_at=VALUES(login_at)",
+                    (server_name, player_name, str(gid), login_at),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _remove_online_state_impl(self, server_name: str, player_name: str):
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM online_state WHERE server_name=%s AND player_name=%s",
+                    (server_name, player_name),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _load_online_state_impl(self) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT server_name, player_name, gid, login_at FROM online_state")
+                rows = cur.fetchall()
+                return [
+                    {"server_name": r[0], "player_name": r[1], "gid": r[2], "login_at": r[3]}
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
+    def _clear_online_state_impl(self):
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM online_state")
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _add_online_session_impl(self, server: str, player: str, start_ts: int, end_ts: int):
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO online_sessions (server_name, player_name, start_ts, end_ts) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (server, player, start_ts, end_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _get_online_sessions_impl(self, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT server_name, player_name, start_ts, end_ts "
+                    "FROM online_sessions ORDER BY start_ts DESC LIMIT %s",
+                    (limit,),
+                )
+                rows = cur.fetchall()
+                return [
+                    {"server_name": r[0], "player_name": r[1], "start_ts": r[2], "end_ts": r[3]}
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
+    def _get_player_sessions_impl(self, player_name: str, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT server_name, player_name, start_ts, end_ts "
+                    "FROM online_sessions WHERE player_name=%s "
+                    "ORDER BY start_ts DESC LIMIT %s",
+                    (player_name, limit),
+                )
+                rows = cur.fetchall()
+                return [
+                    {"server_name": r[0], "player_name": r[1], "start_ts": r[2], "end_ts": r[3]}
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
     def get_online_sessions(self, limit: int = 50) -> list:
         """获取最近的在线会话记录"""
         source = self
         if self._read_source == "external" and self._ext_db:
             source = self._ext_db
-        with source._lock:
-            conn = source._connect()
+        return source._get_online_sessions_impl(limit)
+
+    def _get_online_sessions_impl(self, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
             try:
                 rows = conn.execute(
                     "SELECT server_name, player_name, start_ts, end_ts FROM online_sessions ORDER BY start_ts DESC LIMIT ?",
@@ -637,8 +811,11 @@ class Database:
         source = self
         if self._read_source == "external" and self._ext_db:
             source = self._ext_db
-        with source._lock:
-            conn = source._connect()
+        return source._get_player_sessions_impl(player_name, limit)
+
+    def _get_player_sessions_impl(self, player_name: str, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
             try:
                 rows = conn.execute(
                     "SELECT server_name, player_name, start_ts, end_ts FROM online_sessions WHERE player_name=? ORDER BY start_ts DESC LIMIT ?",
@@ -1022,5 +1199,41 @@ class ExternalSQLiteDB:
             try:
                 conn.execute("DELETE FROM online_state")
                 conn.commit()
+            finally:
+                conn.close()
+
+    def _add_online_session_impl(self, server: str, player: str, start_ts: int, end_ts: int):
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "INSERT INTO online_sessions (server_name, player_name, start_ts, end_ts) VALUES (?, ?, ?, ?)",
+                    (server, player, start_ts, end_ts),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _get_online_sessions_impl(self, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT server_name, player_name, start_ts, end_ts FROM online_sessions ORDER BY start_ts DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def _get_player_sessions_impl(self, player_name: str, limit: int = 50) -> list:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT server_name, player_name, start_ts, end_ts FROM online_sessions WHERE player_name=? ORDER BY start_ts DESC LIMIT ?",
+                    (player_name, limit),
+                ).fetchall()
+                return [dict(r) for r in rows]
             finally:
                 conn.close()
