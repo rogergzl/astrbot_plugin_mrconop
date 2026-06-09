@@ -6,11 +6,9 @@ import re
 import time
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, StarTools
-
-from astrbot.api.message_chain import MessageChain
 
 from .log_listener import LogListenerManager
 from .rcon_executor import rcn_send as _rcn_send
