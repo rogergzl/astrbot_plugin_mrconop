@@ -86,10 +86,19 @@ async def _on_log_event(plugin, server_name: str, event_type: str, player: str, 
             await _execute_event_macros(plugin, server_name, "player_first_join", player, raw_line)
         if plugin.admin_mc_ids and player in plugin.admin_mc_ids:
             await _execute_event_macros(plugin, server_name, "admin_join", player, raw_line)
-        if p and p.get("vip_level", 0) > 0:
-            await _execute_event_macros(plugin, server_name, "vip_join", player, raw_line)
+        vip_level = int(p.get("vip_level", 0) or 0) if p else 0
+        if vip_level > 0:
+            await _execute_event_macros(plugin, server_name, "vip_join", player, raw_line, vip_level=vip_level)
+    elif event_type == "player_leave":
+        p = plugin.db.find_player_by_mc_id(player)
+        vip_level = int(p.get("vip_level", 0) or 0) if p else 0
+        if vip_level > 0:
+            await _execute_event_macros(plugin, server_name, "vip_leave", player, raw_line, vip_level=vip_level)
     elif event_type == "player_death":
         p = plugin.db.find_player_by_mc_id(player)
+        vip_level = int(p.get("vip_level", 0) or 0) if p else 0
+        if vip_level > 0:
+            await _execute_event_macros(plugin, server_name, "vip_death", player, raw_line, vip_level=vip_level)
         if not p:
             if plugin._is_valid_player_name(player) and player.lower() in plugin._known_real_players:
                 plugin.db.insert_player_raw("_imported_" + player, player, 50, int(time.time()))
@@ -218,7 +227,7 @@ async def _relay_log_event_to_groups(plugin, server_name: str, event_type: str, 
         logger.debug(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} 未转发（无匹配群或日志类型/开关未启用）")
 
 
-async def _execute_event_macros(plugin, server_name: str, event_type: str, player: str, raw_line: str = ""):
+async def _execute_event_macros(plugin, server_name: str, event_type: str, player: str, raw_line: str = "", vip_level: int = 0):
     now = time.time()
     for i, macro in enumerate(plugin._event_macros):
         if not isinstance(macro, dict):
@@ -237,6 +246,10 @@ async def _execute_event_macros(plugin, server_name: str, event_type: str, playe
         else:
             for et in raw_ets:
                 if isinstance(et, dict) and et.get("type") == event_type:
+                    # VIP 等级过滤：宏的 vip_level>0 时仅匹配对应等级
+                    et_vip = int(et.get("vip_level", 0) or 0)
+                    if et_vip > 0 and et_vip != vip_level:
+                        continue
                     matched_et = et
                     break
             if not matched_et:

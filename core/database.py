@@ -395,14 +395,43 @@ class Database:
             finally:
                 conn.close()
 
-    def get_player_total_seconds(self, player: str) -> int:
+    def delete_online_sessions_before(self, before_timestamp: int) -> int:
+        """删除指定时间戳之前的在线会话记录，返回删除行数"""
+        targets = self._get_target_db(for_write=True)
+        total = 0
+        for db in targets:
+            total += db._delete_online_sessions_before_impl(before_timestamp)
+        return total
+
+    def _delete_online_sessions_before_impl(self, before_timestamp: int) -> int:
         with self._lock:
             conn = self._connect()
             try:
-                row = conn.execute(
-                    "SELECT SUM(end_ts - start_ts) as total FROM online_sessions WHERE player_name = ?",
-                    (player,),
-                ).fetchone()
+                cur = conn.execute(
+                    "DELETE FROM online_sessions WHERE end_ts < ?",
+                    (before_timestamp,),
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+    def get_player_total_seconds(self, player: str, max_age_hours: int = 0) -> int:
+        """获取玩家累计在线秒数。max_age_hours>0 时仅统计最近N小时内的记录"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                if max_age_hours > 0:
+                    cutoff = int(time.time()) - max_age_hours * 3600
+                    row = conn.execute(
+                        "SELECT SUM(end_ts - start_ts) as total FROM online_sessions WHERE player_name = ? AND end_ts >= ?",
+                        (player, cutoff),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT SUM(end_ts - start_ts) as total FROM online_sessions WHERE player_name = ?",
+                        (player,),
+                    ).fetchone()
                 return int(row["total"] or 0) if row else 0
             finally:
                 conn.close()
@@ -747,6 +776,20 @@ class ExternalMySQLDB:
                     (server, player, start_ts, end_ts),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def _delete_online_sessions_before_impl(self, before_timestamp: int) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM online_sessions WHERE end_ts < %s",
+                    (before_timestamp,),
+                )
+                conn.commit()
+                return cur.rowcount
             finally:
                 conn.close()
 
@@ -1211,6 +1254,19 @@ class ExternalSQLiteDB:
                     (server, player, start_ts, end_ts),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def _delete_online_sessions_before_impl(self, before_timestamp: int) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM online_sessions WHERE end_ts < ?",
+                    (before_timestamp,),
+                )
+                conn.commit()
+                return cur.rowcount
             finally:
                 conn.close()
 

@@ -198,6 +198,60 @@ def _save_server_log_configs(plugin):
         logger.warning(f"[mrcon] 保存服务器日志配置失败: {e}")
 
 
+def _load_ranking_state(plugin):
+    """加载持久化的排行状态（_last_ranking_reset 时间戳）"""
+    fpath = os.path.join(plugin.plugin_data_dir, "ranking_state.json")
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                plugin._last_ranking_reset = int(data.get("last_ranking_reset", 0))
+                logger.info(f"[mrcon] 已加载排行状态: last_reset={plugin._last_ranking_reset}")
+        except Exception as e:
+            logger.warning(f"[mrcon] 加载 ranking_state.json 失败: {e}")
+
+
+def _save_ranking_state(plugin):
+    """持久化排行状态"""
+    fpath = os.path.join(plugin.plugin_data_dir, "ranking_state.json")
+    try:
+        os.makedirs(plugin.plugin_data_dir, exist_ok=True)
+        data = {"last_ranking_reset": plugin._last_ranking_reset}
+        with open(fpath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"[mrcon] 保存 ranking_state.json 失败: {e}")
+
+
+def _cleanup_old_ranking_data(plugin, now: int):
+    """清理超出单次记录时长的旧排行数据"""
+    if plugin.ranking_reset_hours > 0:
+        cutoff = now - plugin.ranking_reset_hours * 3600
+        try:
+            deleted = plugin.db.delete_online_sessions_before(cutoff)
+            if deleted > 0:
+                logger.info(f"[mrcon] 已清理 {deleted} 条超出 {plugin.ranking_reset_hours} 小时的旧排行记录")
+        except Exception as e:
+            logger.error(f"[mrcon] 清理旧排行数据失败: {e}")
+
+
+def _expand_placeholders(template: str, player: str, session_mins: int, ban_mins: int, reason: str = "") -> str:
+    """统一占位符替换，踢出原因和封禁命令共用。
+    
+    占位符:
+        {player}  - 玩家名
+        {hours}   - 已在线整小时 (session_mins // 60)
+        {minutes} - 封禁时长分钟数 (ban_mins)
+        {reason}  - 已展开的踢出原因文本 (用于封禁命令嵌入)
+    """
+    return (template
+        .replace("{player}", player)
+        .replace("{hours}", str(session_mins // 60))
+        .replace("{minutes}", str(ban_mins))
+        .replace("{reason}", reason))
+
+
 def _get_tracker_config(plugin, gid: str) -> dict:
     override = plugin._tracker_overrides.get(str(gid), {})
     if override.get("use_global"):
@@ -215,6 +269,7 @@ def _get_tracker_config(plugin, gid: str) -> dict:
         "kick_threshold": override.get("kick_threshold", plugin.tracker_kick_threshold),
         "kick_reason": override.get("kick_reason", plugin.tracker_kick_reason),
         "ban_minutes": override.get("ban_minutes", plugin.tracker_ban_minutes),
+        "ban_cmd": override.get("ban_cmd", plugin.tracker_ban_cmd),
         "duration_mode": override.get("duration_mode", plugin.tracker_duration_mode),
     }
 
@@ -340,25 +395,8 @@ async def _online_tracker_loop(plugin):
                 tcfg = _get_tracker_config(plugin, gid)
                 online = await _get_online_player_list(plugin, conf)
                 srv_name = conf.get("server_name", "unknown")
-                for key in list(plugin._pending_unbans.keys()):
-                    ub = plugin._pending_unbans[key]
-                    if now >= ub["unban_at"]:
-                        try:
-                            await _rcn_send(
-                                ub["conf"]["rcon_host"], ub["conf"]["rcon_port"],
-                                ub["conf"]["rcon_password"], f"pardon {ub['player']}",
-                            )
-                            logger.info(f"[mrcon] 自动解封 {ub['player']} @ {ub['conf'].get('server_name', '?')}")
-                            plugin._audit_web("auto_unban", f"玩家 {ub['player']} 在 {ub['conf'].get('server_name', '?')} 已自动解除封禁", True, "在线追踪")
-                        except Exception:
-                            pass
-                        plugin._banned_players.discard(key)
-                        del plugin._pending_unbans[key]
                 for player in online:
                     sid = f"{srv_name}:{player}"
-                    ban_key = f"{srv_name}:{player}"
-                    if ban_key in plugin._banned_players:
-                        continue
                     if sid not in plugin._online_cache:
                         cache_entry = {
                             "login_at": now, "player": player, "server": srv_name,
@@ -366,7 +404,7 @@ async def _online_tracker_loop(plugin):
                         }
                         init_mins = 0
                         if tcfg.get("duration_mode", "session") == "cumulative":
-                            total_secs = plugin.db.get_player_total_seconds(player)
+                            total_secs = plugin.db.get_player_total_seconds(player, plugin.ranking_reset_hours)
                             init_mins += total_secs // 60
                         if tcfg["notify"]:
                             for threshold in tcfg["notify_intervals"]:
@@ -389,7 +427,7 @@ async def _online_tracker_loop(plugin):
                     session_mins = (now - cache["login_at"]) // 60
                     duration_mode = tcfg.get("duration_mode", "session")
                     if duration_mode == "cumulative":
-                        total_secs = plugin.db.get_player_total_seconds(player)
+                        total_secs = plugin.db.get_player_total_seconds(player, plugin.ranking_reset_hours)
                         session_mins += total_secs // 60
                     dur_label = "累计" if duration_mode == "cumulative" else "连续"
                     if tcfg["notify"]:
@@ -419,9 +457,9 @@ async def _online_tracker_loop(plugin):
                                         logger.error(f"[mrcon] 游戏内提醒失败: {e}")
                     if tcfg["kick_enabled"] and not cache["kicked"] and session_mins >= tcfg["kick_threshold"]:
                         cache["kicked"] = True
-                        reason = tcfg["kick_reason"].replace("{player}", player)
+                        ban_mins = tcfg["ban_minutes"]
+                        reason = _expand_placeholders(tcfg["kick_reason"], player, session_mins, ban_mins)
                         kick_cmd = f"kick {player} {reason}"
-                        ban_key = f"{srv_name}:{player}"
                         try:
                             await _rcn_send(
                                 conf["rcon_host"], conf["rcon_port"],
@@ -433,18 +471,14 @@ async def _online_tracker_loop(plugin):
                                 tcfg, is_kick=True
                             )
                             plugin._audit_web("auto_kick", f"玩家 {player} 在 {srv_name} 因在线过久({tcfg['kick_threshold']}分钟)被自动踢出，原因: {reason}", True, "在线追踪")
-                            ban_mins = tcfg["ban_minutes"]
                             if ban_mins > 0:
+                                ban_cmd_tpl = tcfg.get("ban_cmd", "tempban {player} {minutes}m {reason}")
+                                ban_cmd = _expand_placeholders(ban_cmd_tpl, player, session_mins, ban_mins, reason)
                                 await _rcn_send(
                                     conf["rcon_host"], conf["rcon_port"],
-                                    conf["rcon_password"], f"ban {player} {reason}",
+                                    conf["rcon_password"], ban_cmd,
                                 )
-                                plugin._pending_unbans[ban_key] = {
-                                    "unban_at": now + ban_mins * 60,
-                                    "player": player, "conf": conf,
-                                }
-                                plugin._banned_players.add(ban_key)
-                                plugin._audit_web("auto_ban", f"玩家 {player} 在 {srv_name} 被自动封禁 {ban_mins} 分钟，原因: {reason}", True, "在线追踪")
+                                plugin._audit_web("auto_ban", f"玩家 {player} 在 {srv_name} 被自动封禁 {ban_mins} 分钟，命令: {ban_cmd}", True, "在线追踪")
                         except Exception as e:
                             logger.error(f"[mrcon] 自动踢出失败: {e}")
                             await _send_tracker_notify(
@@ -483,7 +517,7 @@ async def _online_tracker_loop(plugin):
                                 session_mins_t = (now_ts - cache["login_at"]) // 60
                                 total_mins = session_mins_t
                                 if dur_mode == "cumulative":
-                                    total_secs = plugin.db.get_player_total_seconds(player_name)
+                                    total_secs = plugin.db.get_player_total_seconds(player_name, plugin.ranking_reset_hours)
                                     total_mins += total_secs // 60
                                 if total_mins >= dur_min:
                                     plugin._online_duration_triggered[trigger_key] = True
@@ -540,14 +574,13 @@ async def _online_tracker_loop(plugin):
                 last = plugin._last_ranking_reset
                 if last == 0:
                     plugin._last_ranking_reset = now
+                    # 首次启动时，立即清理超出记录时长的旧数据
+                    _cleanup_old_ranking_data(plugin, now)
+                    _save_ranking_state(plugin)
                 elif (now - last) >= plugin.ranking_reset_hours * 3600:
-                    try:
-                        plugin.db._connect().cursor().execute("DELETE FROM online_sessions")
-                        plugin.db._connect().commit()
-                        plugin._last_ranking_reset = now
-                        logger.info(f"[mrcon] 已自动重置在线时长排行（间隔 {plugin.ranking_reset_hours} 小时）")
-                    except Exception as e:
-                        logger.error(f"[mrcon] 自动重置排行失败: {e}")
+                    _cleanup_old_ranking_data(plugin, now)
+                    plugin._last_ranking_reset = now
+                    _save_ranking_state(plugin)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -588,6 +621,7 @@ async def cmd_tracker_set(plugin, event: AstrMessageEvent, sub: str = "", val1: 
             f"  踢出开关: {'✅ 开' if gcfg['kick_enabled'] else '❌ 关'}\n"
             f"  踢出阈值: {gcfg['kick_threshold']} 分钟\n"
             f"  踢出封禁: {gcfg.get('ban_minutes', 0)} 分钟\n"
+            f"  封禁命令: {gcfg.get('ban_cmd', 'tempban {player} {minutes}m {reason}')}\n"
             f"  踢出原因: {gcfg['kick_reason']}\n"
             f"  时长模式: {dm_label}\n"
             f"  {'🟢 使用全局' if ovr.get('use_global') else '🟢 群内覆盖' if ovr else '🔵 沿用全局默认'}\n"
@@ -636,6 +670,8 @@ async def cmd_tracker_set(plugin, event: AstrMessageEvent, sub: str = "", val1: 
                 elif k == "封禁":
                     try: ovr["ban_minutes"] = int(v)
                     except ValueError: pass
+                elif k == "封禁命令":
+                    ovr["ban_cmd"] = v
                 elif k == "原因":
                     ovr["kick_reason"] = v
                 elif k == "模式":
@@ -728,10 +764,12 @@ async def cmd_tracker_set(plugin, event: AstrMessageEvent, sub: str = "", val1: 
     if sub == "封禁":
         try:
             ovr["ban_minutes"] = int(val1)
+            if val2:
+                ovr["ban_cmd"] = val2
             _save_tracker_overrides(plugin)
-            yield event.plain_result(f"✅ 踢出后封禁时长已设为 {val1} 分钟（0=不封禁）")
+            yield event.plain_result(f"✅ 踢出后封禁时长已设为 {val1} 分钟（0=不封禁）\n命令模板: {ovr.get('ban_cmd', 'tempban {player} {minutes}m {reason}')}")
         except ValueError:
-            yield event.plain_result("封禁时长应为数字（分钟），0=不封禁")
+            yield event.plain_result("封禁时长应为数字（分钟），0=不封禁，可选第二个参数为命令模板")
         return
 
     if sub == "踢出":

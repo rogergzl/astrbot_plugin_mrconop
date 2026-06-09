@@ -73,6 +73,7 @@ from .core.online_tracker import _save_server_log_configs as _core_save_server_l
 from .core.online_tracker import _get_tracker_config as _core_get_tracker_config
 from .core.online_tracker import _send_tracker_notify as _core_send_tracker_notify
 from .core.online_tracker import _online_tracker_loop as _core_online_tracker_loop
+from .core.online_tracker import _load_ranking_state as _core_load_ranking_state
 
 from .core.log_events import _init_log_listeners as _core_init_log_listeners
 from .core.log_events import _on_log_event as _core_on_log_event
@@ -142,7 +143,7 @@ from .core.server_manager import cmd_onlinetime as _core_cmd_onlinetime
 from .core.online_tracker import cmd_tracker_set as _core_cmd_tracker_set
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "3.47.0")
+@register("mrcon", "lindagao", "MC 综合管理插件", "4.0.0")
 class MrconPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -181,6 +182,8 @@ class MrconPlugin(Star):
         self.rate_max_ms = int(rate_limit_cfg.get("max_interval_ms", 10000) or 10000)
         self.rate_auto_recovery = bool(rate_limit_cfg.get("auto_recovery", True))
         self.rate_recovery_s = int(rate_limit_cfg.get("recovery_minutes", 10) or 10) * 60
+        self.rate_whitelist = set(str(s).strip() for s in (rate_limit_cfg.get("whitelist_qqs", []) or []) if str(s).strip())
+        self.rate_whitelist_min_delay_ms = int(rate_limit_cfg.get("whitelist_min_delay_ms", 200) or 200)
         self.dangerous_blacklist = list(admin_cfg.get("dangerous_commands_blacklist", []))
 
         query_cfg = self.config.get("query", {})
@@ -210,7 +213,7 @@ class MrconPlugin(Star):
         )
         self.tracker_kick_enabled = bool(tracker_cfg.get("auto_kick_enabled", False))
         self.tracker_kick_threshold = int(tracker_cfg.get("auto_kick_threshold", 720) or 720)
-        self.tracker_kick_reason = str(tracker_cfg.get("auto_kick_reason", "你已连续在线过久，请休息一下！") or "")
+        self.tracker_kick_reason = str(tracker_cfg.get("auto_kick_reason", "") or "§6{player}§r, §a你已在线§e{hours}§a小时§r, §c请休息§d{minutes}§c分钟吧§r")
         self.tracker_notify_game = bool(tracker_cfg.get("notify_in_game", False))
         self.tracker_game_format = str(tracker_cfg.get("notify_game_format", "{player} 已连续在线 {duration}，注意休息！") or "")
         self.tracker_game_prefix = str(tracker_cfg.get("notify_game_prefix", "§e[在线提醒]") or "")
@@ -223,16 +226,15 @@ class MrconPlugin(Star):
         self.game_notify_prefix = str(general_cfg.get("game_notify_prefix", "§6[通知]") or "")
         self.admin_mc_ids = [s.strip() for s in str(general_cfg.get("admin_mc_ids", "") or "").split(",") if s.strip()]
         self.tracker_ban_minutes = int(tracker_cfg.get("auto_kick_ban_minutes", 30) or 30)
+        self.tracker_ban_cmd = str(tracker_cfg.get("auto_kick_ban_cmd", "tempban {player} {minutes}m {reason}") or "tempban {player} {minutes}m {reason}")
         self.tracker_duration_mode = str(tracker_cfg.get("duration_mode", "session") or "session")
-        self.ranking_reset_hours = int(tracker_cfg.get("ranking_reset_interval_hours", 0) or 0)
+        self.ranking_reset_hours = int(tracker_cfg.get("ranking_reset_interval_hours", 24) or 24)
         self._last_ranking_reset = 0
         self._pending_msgs = {}
         self._last_umo = {}
         self._umo_prefix = ""
         self._recent_log_events: dict[tuple, float] = {}
         self._tracker_overrides = {}
-        self._pending_unbans = {}
-        self._banned_players: set = set()
 
         self.log_listener_enabled = bool(tracker_cfg.get("log_listener_enabled", False))
         self.online_history_max_bars = int(tracker_cfg.get("online_history_max_bars", 70) or 70)
@@ -309,6 +311,7 @@ class MrconPlugin(Star):
         self._trigger_cooldowns = {}
 
         self.plugin_data_dir = StarTools.get_data_dir("mrcon")
+        _core_load_ranking_state(self)
         self.relay_overrides_path = os.path.join(self.plugin_data_dir, "relay_overrides.json")
         self._tracker_overrides = self._load_tracker_overrides()
         gov = self._load_general_overrides()

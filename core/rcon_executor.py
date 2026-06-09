@@ -53,7 +53,7 @@ async def execute_and_reply(plugin, event, command: str, desc: str):
     sender_qq = str(event.get_sender_id())
     named = f"{user_name}({sender_qq})"
     key = _rate_key(plugin, event)
-    wait = _check_rate(plugin, key)
+    wait = _check_rate(plugin, key, event)
     if wait > 0:
         yield event.plain_result(f"当前繁忙，请在 {int((wait+999)//1000)} 秒后重试")
         return
@@ -95,7 +95,7 @@ async def execute_on_conf(plugin, event, conf: dict, command: str, desc: str):
     sender_qq = str(event.get_sender_id())
     named = f"{user_name}({sender_qq})"
     key = _rate_key(plugin, event)
-    wait = _check_rate(plugin, key)
+    wait = _check_rate(plugin, key, event)
     if wait > 0:
         yield event.plain_result(f"当前繁忙，请在 {int((wait+999)//1000)} 秒后重试")
         return
