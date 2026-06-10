@@ -103,6 +103,17 @@ async def _on_log_event(plugin, server_name: str, event_type: str, player: str, 
             if plugin._is_valid_player_name(player) and player.lower() in plugin._known_real_players:
                 plugin.db.insert_player_raw("_imported_" + player, player, 50, int(time.time()))
             await _execute_event_macros(plugin, server_name, "player_first_death", player, raw_line)
+    elif event_type == "player_death_pvp":
+        # player_death_pvp 同时触发 player_death 宏（兼容只监听 player_death 的宏配置）
+        await _execute_event_macros(plugin, server_name, "player_death", player, raw_line)
+        p = plugin.db.find_player_by_mc_id(player)
+        vip_level = int(p.get("vip_level", 0) or 0) if p else 0
+        if vip_level > 0:
+            await _execute_event_macros(plugin, server_name, "vip_death", player, raw_line, vip_level=vip_level)
+        if not p:
+            if plugin._is_valid_player_name(player) and player.lower() in plugin._known_real_players:
+                plugin.db.insert_player_raw("_imported_" + player, player, 50, int(time.time()))
+            await _execute_event_macros(plugin, server_name, "player_first_death", player, raw_line)
 
 
 def _get_group_umo(plugin, gid: str) -> str:
@@ -158,6 +169,20 @@ async def _relay_log_event_to_groups(plugin, server_name: str, event_type: str, 
         candidate_entries.setdefault(gid, [])
         entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
         candidate_entries[gid].extend(entry_list)
+
+    # 自动补充 group_servers 中绑定当前服务器但无 relay 配置的群（全局模式）
+    if plugin.log_listener_enabled:
+        for gid, srvs in plugin.group_servers.items():
+            gid = str(gid)
+            if gid in candidate_entries:
+                continue
+            for srv in (srvs or []):
+                if not isinstance(srv, dict):
+                    continue
+                sn = srv.get("server_name") or srv.get("name", "")
+                if sn == server_name:
+                    candidate_entries.setdefault(gid, []).append({"mode": "global"})
+                    break
 
     for gid, entry_list in candidate_entries.items():
         gid = str(gid)
@@ -218,8 +243,12 @@ async def _relay_log_event_to_groups(plugin, server_name: str, event_type: str, 
                 await plugin.context.send_message(umo, chain)
                 forwarded[gid] = gname
                 logger.info(f"[mrcon] 日志转发 MC→群 [{server_name}] -> {gname}({gid}) {text[:60]}")
+                plugin._audit_auto("relay", text[:200], f"→{gname}({gid})", True,
+                                   event_type=event_type, server_name=server_name, group_id=gid)
             except Exception as e:
                 logger.error(f"[mrcon] 日志互通 MC→群 失败 [{gname}({gid})]: {e}")
+                plugin._audit_auto("relay", f"日志转发失败 [{server_name}]", str(e)[:200], False,
+                                   event_type=event_type, server_name=server_name, group_id=gid)
     if forwarded:
         gnames = ", ".join(f"{n}({g})" for g, n in forwarded.items())
         logger.info(f"[mrcon] 日志互通 MC→群 [{server_name}] {event_type} → {len(forwarded)} 群: {gnames}")
@@ -360,10 +389,12 @@ async def _execute_event_macros(plugin, server_name: str, event_type: str, playe
                     srv_conf["rcon_password"], cmd,
                 )
                 logger.info(f"[LogEvent] 宏 '{macro.get('name','?')}' 执行: {cmd} -> {resp[:80]}")
-                plugin._audit_auto("event_macro", cmd, str(resp)[:500], True)
+                plugin._audit_auto("event_macro", cmd, str(resp)[:500], True,
+                                 event_type=event_type, server_name=server_name)
             except Exception as e:
                 logger.warning(f"[LogEvent] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
-                plugin._audit_auto("event_macro", cmd, str(e)[:500], False)
+                plugin._audit_auto("event_macro", cmd, str(e)[:500], False,
+                                 event_type=event_type, server_name=server_name)
         if post_delay > 0:
             await asyncio.sleep(post_delay)
         qq_message = (macro.get("qq_message", "") or "").strip()

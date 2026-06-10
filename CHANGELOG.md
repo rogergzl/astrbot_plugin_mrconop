@@ -2,29 +2,18 @@
 
 ---
 
-## v4.2.2 | 2026-06-10
+## v4.2.5 | 2026-06-10
 
 | 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
 |------|------|--------|----------|----------|----------|------|
-| 2026-06-10 | v4.2.2 | lindagao | Bug 修复 | 日志事件/在线宏 | 补全事件宏 `{mc_id}` 和 `{qq}` 变量实际替换逻辑（此前仅在 Web 面板文档中列出但 RCON/QQ 路径均未实现）；RCON 命令与 QQ 消息路径均通过 `find_player_by_mc_id` 查询 DB 后统一替换；DB 查询在每个宏匹配中仅执行一次 | `{mc_id}` 取玩家绑定的 MC ID，`{qq}` 取绑定 QQ 号；`pdb_enabled` 关闭或未找到时 `{mc_id}` 回退为玩家名、`{qq}` 回退为空串 |
-
----
-
-## v4.2.1 | 2026-06-10
-
-| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
-|------|------|--------|----------|----------|----------|------|
-| 2026-06-10 | v4.2.1 | lindagao | 功能优化 | 日志事件/在线宏 | 事件宏前缀转换扩展支持 `tell`/`msg` 私聊命令，统一转 `tellraw <target>`；去除 Minecraft RCON 私聊默认的 "Rcon 悄悄地对你说" 前缀，仅显示 `event_macro_game_prefix` 配置前缀 | `say` → `tellraw @a`、`tell/msg` → `tellraw <target>`；无前缀配置时不转换，兼容通用 |
-
----
-
-## v4.2.0 | 2026-06-10
-
-| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
-|------|------|--------|----------|----------|----------|------|
-| 2026-06-10 | v4.2.0 | lindagao | 功能新增 | 日志监听 | `LogWatcher._position` 与 `_inode` 持久化到 `log_positions.json`；重启后自动恢复文件读取位置，避免重启窗口期日志事件丢失；每30秒自动保存 + stop 时保存；校验 inode 匹配 + 文件大小后才恢复 | 旧版 `_position` 仅内存存储，插件重启即跳到文件末尾 |
-| 2026-06-10 | v4.2.0 | lindagao | 功能新增 | 审计日志 | 新增 `_audit_auto()` 函数，补全全部自动化 RCON 命令的审计记录：事件宏(`event_macro`)、在线时长宏(`online_duration_macro`)、上线触发器(`online_trigger`)、群服转发(`relay`)、游戏内提醒(`game_notify`)；新增 `audit.auto_enabled` 开关与 `audit.skip_categories` 过滤列表配置 | RCON 保活/轮询 `list` 默认不审计；可通过 `audit.skip_categories` 屏蔽高频类别 |
-| 2026-06-10 | v4.2.0 | lindagao | 功能优化 | 日志事件/在线宏 | 日志事件宏与在线时长宏的 `say` 命令改用 `tellraw @a` 发送，去除 Minecraft 默认 `[Server]` 前缀；仅显示用户在通用配置中设定的 `event_macro_game_prefix` | 用户反馈前缀问题，改用 tellraw 后仅显示配置前缀 |
+| 2026-06-10 | v4.2.5 | lindagao | Bug 修复 | 配置 Schema | `_conf_schema.json` 审计 `retention_days` 字段 `"type": "integer"` → `"int"`，修复 AstrBot 不支持的配置类型导致插件加载失败 | AstrBot 仅支持 `int/float/bool/string/text/list/file/object/template_list` |
+| 2026-06-10 | v4.2.5 | lindagao | Bug 修复 | Web面板/审计 | 修复 4 个 JS 错误：`hx` 未定义（别名 `escapeHtml`）、分类按钮 `fs` 作用域泄漏（改用 `loAu._fs`）、`loAu(pg,cat)` 参数顺序颠倒导致 `NaN` 分页偏移 | 全量修复后审计页面可用 |
+| 2026-06-10 | v4.2.5 | Bug 修复 | Web面板/审计 | 审计页面布局重构：搜索栏 + 分类按钮区独立为 `#au-top`（不销毁），表格 + 分页区独立为 `#au-res`（增量更新）；新增 `loAu_li()` 防抖函数（300ms）仅更新 `#au-res`，输入框不丢失焦点 | 解决每次输入都触发全量 innerHTML 重建导致输入体验崩溃 |
+| 2026-06-10 | v4.2.5 | Bug 修复 | Web面板/审计 | 操作列超长 RCON 命令截断显示（`max-width:180px` + `text-overflow:ellipsis`），鼠标悬停 `title` 显示全文 | 不影响结果/详情列布局 |
+| 2026-06-10 | v4.2.5 | Bug 修复 | 审计搜索 | 关键词搜索范围扩展 `event_type` 字段（DB 路径 `LIKE` + JSONL 回退路径 `in`），搜 `cha` 可匹配 `chat` 类型记录 | 原仅搜索 `cmd/resp/sender_name` 三字段 |
+| 2026-06-10 | v4.2.5 | Bug 修复 | 群服互联 | 服→群日志转发 `_relay_log_event_to_groups` + 模组转发 `_on_mc_chat` 补充 `_audit_auto("relay", ...)` 审计调用，修复日志审查中"群服转发"分类无记录 | 群→服方向已有审计，仅补充服→群方向 |
+| 2026-06-10 | v4.2.5 | 功能优化 | 群服互联 | 日志/模组转发自动纳入 `group_servers`（服务器管理绑定）中的群，未配置 relay override 时以 `"mode":"global"` 参与转发 | 重装插件后无需群里先说话即可恢复转发 |
+| 2026-06-10 | v4.2.5 | 功能优化 | Web面板/审计 | 新增 `loAu_li()` 实时搜索：关键词和事件类型输入框触发 300ms 防抖自动查询，输入即刷新、删空即还原 | 保留回车/搜索按钮原有行为 |
 
 ---
 
@@ -60,3 +49,49 @@
 - 本次更新包含代码架构完全重构（从大泥球变为独立模块方式），版本号由 3.48.0 升级至 4.0.0
 - `ranking_reset_hours` 配置键 `ranking_reset_interval_hours` 保持不变，向后兼容
 - 白名单配置保存后即时生效，无需重启插件
+
+---
+
+## v4.2.4 | 2026-06-10
+
+| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
+|------|------|--------|----------|----------|----------|------|
+| 2026-06-10 | v4.2.4 | lindagao | 功能新增 | 审计日志 | 审计日志数据库化：新增 `audit_logs` 表（含 `event_type`/`server_name`/`group_name` 字段），双写 JSONL + DB | 自动建表、建索引；JSONL 双写可关闭 |
+| 2026-06-10 | v4.2.4 | lindagao | 功能新增 | Web面板 | 审计日志升级为数据库搜索：支持关键词搜索、事件类型筛选、时间范围筛选、分页浏览、CSV/JSON 导出、批量勾选删除 | 每页50条，保留 JSONL 回退 |
+| 2026-06-10 | v4.2.4 | lindagao | 功能新增 | 审计日志 | 新增 `audit.retention_days` 自动清理：每小时清理超过保留天数的记录（默认90天，0=不清理） | 后台异步任务 |
+| 2026-06-10 | v4.2.4 | lindagao | 功能扩展 | 审计引擎 | 所有 `_audit_auto` 调用方（log_events/online_tracker/server_manager/relay）补充 `event_type` 和 `server_name` 参数，审计记录可区分死亡类型/触发来源 | 向后兼容：旧调用方缺失参数自动填空串 |
+
+---
+
+## v4.2.3 | 2026-06-10
+
+| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
+|------|------|--------|----------|----------|----------|------|
+| 2026-06-10 | v4.2.3 | lindagao | Bug 修复 | 日志事件宏 | `player_death_pvp` 前移优先匹配（`was slain/killed/shot/frozen by`），`_on_log_event` 新增桥接分支将 PVP 死亡统一触发 `player_death`/`vip_death`/`player_first_death` 宏；`player_death` 正则扩展 `was killed`（/kill 命令）。保留独立死亡分类确保 relay/审计正确区分死亡类型 | 所有死亡方式（环境/实体/PVP//kill/虚空等）均可触发监听 `player_death` 的宏 |
+
+---
+
+## v4.2.2 | 2026-06-10
+
+| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
+|------|------|--------|----------|----------|----------|------|
+| 2026-06-10 | v4.2.2 | lindagao | 功能优化 | Web面板 | 🪝日志事件宏说明区改为可折叠形式，新增 `📖参数说明`、`🔄 say/tell/msg 命令自动转换` 折叠块，展示三条 tellraw 转换规则 | 纯文档/UI优化 |
+
+---
+
+## v4.2.1 | 2026-06-10
+
+| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
+|------|------|--------|----------|----------|----------|------|
+| 2026-06-10 | v4.2.1 | lindagao | 功能扩展 | 事件宏/在线时长宏 | `say→tellraw` 转换扩展至 `tell`/`msg` 命令：`tell <target> <msg>` → `tellraw <target>`，`msg <target> <msg>` 同理，移除 Minecraft 默认的 "[Server]" 和 "Rcon悄悄对你说" 前缀 | |
+| 2026-06-10 | v4.2.1 | lindagao | 功能新增 | 事件宏/在线时长宏 | 实现 `{mc_id}`/`{qq}` 变量替换：执行宏时查DB获取玩家绑定信息，RCON命令和QQ消息均支持 | 此前 Web 面板已文档化但未实际实现 |
+
+---
+
+## v4.2.0 | 2026-06-10
+
+| 时间 | 版本 | 操作人 | 变更类型 | 涉及模块 | 变更详情 | 备注 |
+|------|------|--------|----------|----------|----------|------|
+| 2026-06-10 | v4.2.0 | lindagao | 功能新增 | 日志监听 | LogWatcher 读取位置持久化：新增 `_load_positions`/`_save_positions`/`_restore_positions`，每30秒保存到JSON文件，重启后恢复，避免丢失事件 | `POSITION_SAVE_INTERVAL=30` |
+| 2026-06-10 | v4.2.0 | lindagao | 功能新增 | 审计日志 | 新增 `_audit_auto` 审计函数，覆盖事件宏、上线触发器、relay转发、游戏通知等自动化RCON命令；支持 `audit.auto_enabled` 开关和 `audit.skip_categories` 跳过列表 | 配置项新增 `_conf_schema.json` audit 区块 |
+| 2026-06-10 | v4.2.0 | lindagao | 功能优化 | 事件宏 | 事件宏中使用 `say` 命令自动转换为 `tellraw @a`，使用插件配置的前缀替换 Minecraft 默认 `[Server]` 前缀 | 受 `event_macro_game_prefix` 配置控制 |

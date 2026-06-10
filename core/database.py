@@ -124,6 +124,24 @@ class Database:
                         win_time INTEGER NOT NULL,
                         redeemed INTEGER NOT NULL DEFAULT 0
                     );
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        time INTEGER NOT NULL,
+                        category TEXT NOT NULL DEFAULT 'cmd',
+                        event_type TEXT DEFAULT '',
+                        sender_id TEXT DEFAULT '0',
+                        sender_name TEXT DEFAULT '',
+                        group_id TEXT DEFAULT '',
+                        group_name TEXT DEFAULT '',
+                        server_name TEXT DEFAULT '',
+                        cmd TEXT NOT NULL DEFAULT '',
+                        ok INTEGER NOT NULL DEFAULT 1,
+                        resp TEXT DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(time);
+                    CREATE INDEX IF NOT EXISTS idx_audit_category ON audit_logs(category);
+                    CREATE INDEX IF NOT EXISTS idx_audit_sender ON audit_logs(sender_id);
+                    CREATE INDEX IF NOT EXISTS idx_audit_group ON audit_logs(group_id);
                 """)
                 try:
                     conn.execute("ALTER TABLE compensations ADD COLUMN rcon_cmd TEXT NOT NULL DEFAULT ''")
@@ -1159,6 +1177,123 @@ class ExternalMySQLDB:
                 return {"success": True, "prize_cmd": row["prize_cmd"], "prize_name": row["prize_name"]}
             finally:
                 conn.close()
+
+    # ── 审计日志 CRUD ────────────────────────────────────────────
+    def add_audit_log(self, time_ts: int, category: str, cmd: str,
+                      sender_id: str = "0", sender_name: str = "",
+                      group_id: str = "", group_name: str = "",
+                      event_type: str = "", server_name: str = "",
+                      ok: bool = True, resp: str = ""):
+        """插入一条审计日志"""
+        try:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute(
+                        "INSERT INTO audit_logs (time, category, event_type, sender_id, sender_name, "
+                        "group_id, group_name, server_name, cmd, ok, resp) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (int(time_ts), str(category), str(event_type or ""),
+                         str(sender_id), str(sender_name or ""),
+                         str(group_id or ""), str(group_name or ""),
+                         str(server_name or ""), str(cmd or ""),
+                         1 if ok else 0, str(resp or "")[:2000]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
+    def search_audit_logs(self, limit: int = 100, offset: int = 0,
+                          category: str = "", keyword: str = "",
+                          sender_id: str = "", group_id: str = "",
+                          server_name: str = "", event_type: str = "",
+                          ok: int | None = None,
+                          time_from: int = 0, time_to: int = 0) -> tuple[list[dict], int]:
+        """搜索审计日志。返回 (entries, total_count)。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                wheres = []
+                params: list = []
+                if category:
+                    wheres.append("category=?")
+                    params.append(category)
+                if event_type:
+                    wheres.append("event_type=?")
+                    params.append(event_type)
+                if keyword:
+                    wheres.append("(cmd LIKE ? OR resp LIKE ? OR sender_name LIKE ? OR event_type LIKE ?)")
+                    kw = f"%{keyword}%"
+                    params.extend([kw, kw, kw, kw])
+                if sender_id:
+                    wheres.append("sender_id=?")
+                    params.append(sender_id)
+                if group_id:
+                    wheres.append("group_id=?")
+                    params.append(group_id)
+                if server_name:
+                    wheres.append("server_name=?")
+                    params.append(server_name)
+                if ok is not None:
+                    wheres.append("ok=?")
+                    params.append(1 if ok else 0)
+                if time_from > 0:
+                    wheres.append("time>=?")
+                    params.append(time_from)
+                if time_to > 0:
+                    wheres.append("time<=?")
+                    params.append(time_to)
+                where = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+                # 总数
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM audit_logs {where}", params
+                ).fetchone()[0]
+                # 分页
+                rows = conn.execute(
+                    f"SELECT * FROM audit_logs {where} ORDER BY time DESC LIMIT ? OFFSET ?",
+                    params + [int(limit), int(offset)],
+                ).fetchall()
+                return ([dict(r) for r in rows], int(total))
+            finally:
+                conn.close()
+
+    def delete_audit_logs_by_ids(self, ids: list[int]) -> int:
+        """按 ID 批量删除审计日志。返回删除行数。"""
+        if not ids:
+            return 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                placeholders = ",".join("?" * len(ids))
+                cur = conn.execute(
+                    f"DELETE FROM audit_logs WHERE id IN ({placeholders})", ids
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+    def delete_audit_logs_before(self, before_timestamp: int) -> int:
+        """删除指定时间之前的审计日志。返回删除行数。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM audit_logs WHERE time < ?", (int(before_timestamp),)
+                )
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+    def cleanup_audit_logs(self, retention_days: int) -> int:
+        """按保留天数清理审计日志。返回删除行数。"""
+        if retention_days <= 0:
+            return 0
+        cutoff = int(time.time()) - retention_days * 86400
+        return self.delete_audit_logs_before(cutoff)
 
 
 class ExternalSQLiteDB:

@@ -123,10 +123,13 @@ async def _relay_to_mc(plugin, event: AstrMessageEvent, user_name: str, message:
         port = conf.get("rcon_port")
         password = conf.get("rcon_password")
         resp = await _rcn_send(host, port, password, cmd)
-        plugin._audit_auto("relay", cmd[:200], str(resp)[:200] if resp else "", True)
+        svn = conf.get("server_name") or conf.get("name", "")
+        plugin._audit_auto("relay", cmd[:200], str(resp)[:200] if resp else "", True,
+                           event_type="relay", server_name=svn)
     except Exception as e:
         logger.debug(f"[mrcon] relay to MC failed: {e}")
-        plugin._audit_auto("relay", f"tellraw @a [gid={gid}]", str(e)[:200], False)
+        plugin._audit_auto("relay", f"tellraw @a [gid={gid}]", str(e)[:200], False,
+                           event_type="relay", server_name="")
 
 
 async def cmd_msay(plugin, event: AstrMessageEvent, text: str = "", rest=None):
@@ -153,7 +156,28 @@ async def cmd_msay(plugin, event: AstrMessageEvent, text: str = "", rest=None):
 
 async def _on_mc_chat(plugin, server_name: str, player: str, message: str) -> int:
     count = 0
+    candidate_entries: dict[str, list[dict]] = {}
     for gid, entries in list(plugin._relay_overrides.items()):
+        gid = str(gid)
+        candidate_entries.setdefault(gid, [])
+        entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
+        candidate_entries[gid].extend(entry_list)
+
+    # 自动补充 group_servers 中绑定当前服务器但无 relay 配置的群（全局模式）
+    if plugin.relay_mc_to_group:
+        for gid, srvs in plugin.group_servers.items():
+            gid = str(gid)
+            if gid in candidate_entries:
+                continue
+            for srv in (srvs or []):
+                if not isinstance(srv, dict):
+                    continue
+                sn = srv.get("server_name") or srv.get("name", "")
+                if sn == server_name:
+                    candidate_entries.setdefault(gid, []).append({"mode": "global"})
+                    break
+
+    for gid, entry_list in candidate_entries.items():
         gid = str(gid)
         gid_srvs = plugin.group_servers.get(gid, [])
         gid_map = plugin.group_map.get(gid, {})
@@ -171,7 +195,6 @@ async def _on_mc_chat(plugin, server_name: str, player: str, message: str) -> in
                 matched_srv = True
         if not matched_srv:
             continue
-        entry_list = entries if isinstance(entries, list) else ([entries] if isinstance(entries, dict) else [])
         for entry in entry_list:
             if not isinstance(entry, dict):
                 continue
@@ -195,8 +218,12 @@ async def _on_mc_chat(plugin, server_name: str, player: str, message: str) -> in
                 chain = MessageChain(chain=[Plain(text)])
                 await plugin.context.send_message(umo, chain)
                 count += 1
+                plugin._audit_auto("relay", text[:200], f"→{gname}({gid})", True,
+                                   event_type="chat", server_name=server_name, group_id=gid)
             except Exception as e:
                 logger.error(f"[mrcon] MC→群转发失败 [{gname}({gid})]: {e}")
+                plugin._audit_auto("relay", f"MC→群转发失败 [{server_name}]", str(e)[:200], False,
+                                   event_type="chat", server_name=server_name, group_id=gid)
     if count == 0:
         logger.debug(f"[mrcon] MC 服 {server_name} 消息无匹配群")
     else:

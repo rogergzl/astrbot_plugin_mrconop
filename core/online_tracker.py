@@ -454,10 +454,12 @@ async def _online_tracker_loop(plugin):
                                             conf["rcon_host"], conf["rcon_port"],
                                             conf["rcon_password"], game_cmd,
                                         )
-                                        plugin._audit_auto("game_notify", game_cmd[:200], "", True)
+                                        plugin._audit_auto("game_notify", game_cmd[:200], "", True,
+                                                         event_type="game_notify", server_name=srv_name)
                                     except Exception as e:
                                         logger.error(f"[mrcon] 游戏内提醒失败: {e}")
-                                        plugin._audit_auto("game_notify", game_cmd[:200], str(e)[:200], False)
+                                        plugin._audit_auto("game_notify", game_cmd[:200], str(e)[:200], False,
+                                                         event_type="game_notify", server_name=srv_name)
                     if tcfg["kick_enabled"] and not cache["kicked"] and session_mins >= tcfg["kick_threshold"]:
                         cache["kicked"] = True
                         ban_mins = tcfg["ban_minutes"]
@@ -564,10 +566,12 @@ async def _online_tracker_loop(plugin):
                                                 conf["rcon_password"], cmd,
                                             )
                                             logger.info(f"[OnlineDur] 宏 '{macro.get('name','?')}' 触发: {player_name}({total_mins}min) -> {cmd} -> {resp[:80]}")
-                                            plugin._audit_auto("online_duration_macro", cmd, str(resp)[:500], True)
+                                            plugin._audit_auto("online_duration_macro", cmd, str(resp)[:500], True,
+                                                             event_type="player_online_duration", server_name=srv_name)
                                         except Exception as e:
                                             logger.warning(f"[OnlineDur] 宏 '{macro.get('name','?')}' 失败: {cmd} -> {e}")
-                                            plugin._audit_auto("online_duration_macro", cmd, str(e)[:500], False)
+                                            plugin._audit_auto("online_duration_macro", cmd, str(e)[:500], False,
+                                                             event_type="player_online_duration", server_name=srv_name)
                                     qq_msg = (macro.get("qq_message") or "").strip()
                                     if qq_msg:
                                         qq_msg = qq_msg.replace("{player}", player_name).replace("{server}", srv_name).replace("{mc_id}", _mc_id).replace("{qq}", _qq_id)

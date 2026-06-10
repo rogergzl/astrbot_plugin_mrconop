@@ -260,7 +260,10 @@
     "hint": "控制事件宏、触发器、relay转发、在线提醒等自动RCON命令的审计记录。高频命令（RCON保活/轮询list）默认不审计。",
     "items": {
       "auto_enabled": { "description": "启用自动命令审计", "type": "bool", "hint": "事件宏、在线触发器、群服转发等系统自动触发的RCON命令是否记录到审计日志", "default": true },
-      "skip_categories": { "description": "跳过审计的类别", "type": "list", "items": { "type": "string" }, "hint": "不记录到审计日志的自动命令类别。可选值: event_macro(事件宏), online_duration_macro(在线时长宏), online_trigger(上线触发器), relay(群服转发), game_notify(游戏内提醒), keepalive(RCON保活), poll_list(在线轮询)。建议: relay 高频可跳过", "default": [] }
+      "skip_categories": { "description": "跳过审计的类别", "type": "list", "items": { "type": "string" }, "hint": "不记录到审计日志的自动命令类别。可选值: event_macro(事件宏), online_duration_macro(在线时长宏), online_trigger(上线触发器), relay(群服转发), game_notify(游戏内提醒), keepalive(RCON保活), poll_list(在线轮询)。建议: relay 高频可跳过", "default": [] },
+      "db_enabled": { "description": "启用数据库存储", "type": "bool", "hint": "审计日志存入SQLite/MySQL数据库，支持搜索、分页、导出、自动清理。关闭则仅写JSONL文件", "default": true },
+      "retention_days": { "description": "自动清理保留天数", "type": "int", "hint": "超过此天数的审计日志将被自动删除。0=不自动清理。需启用数据库存储", "default": 90 },
+      "jsonl_enabled": { "description": "同时写JSONL文件", "type": "bool", "hint": "启用数据库存储时是否同时写入audit.log JSONL文件（兼容旧版读取）", "default": true }
     }
   }
 }

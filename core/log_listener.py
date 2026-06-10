@@ -19,6 +19,8 @@ DEFAULT_LOG_PATTERNS = [
     ("player_join", re.compile(r'(\w+) joined the game')),
     ("player_leave", re.compile(r'(\w+) left the game')),
     ("player_chat", re.compile(r'<\s*(\w+)\s*>\s+(.+)')),  # 预置类型（与 chat 同正则），实际由 main._on_log_event 从 chat 事件派生；供自定义覆写
+    # PVP/实体击杀 — 独立分类保留死亡类型区分，宏命令触发经 _on_log_event 桥接到 player_death
+    ("player_death_pvp", re.compile(r'(\w+) was (?:slain|killed|shot|frozen) by (\w+)')),
     ("player_death", re.compile(
         r'(\w+) (?:drowned|'
         r'fell|went up in flames|burned to death|starved to death|'
@@ -30,15 +32,14 @@ DEFAULT_LOG_PATTERNS = [
         r'was squashed|froze to death|'
         r'discovered the floor was lava|'
         r'went off with a bang|'
-        r'was pummeled|was skewered|was roasted|was shredded)'
+        r'was pummeled|was skewered|was roasted|was shredded|'
+        r'was killed)'
     )),
     ("player_advancement", re.compile(r'(\w+) has (?:completed the challenge|made the advancement)')),
     # 玩家复活
     ("player_respawn", re.compile(r'(\w+) (?:respawned|has respawned|returned to life|awoke|has come back)')),
     # 玩家被踢出 / 断连
     ("player_kick", re.compile(r'(\w+) lost connection:')),
-    # PVP 击杀: 玩家被另一玩家击杀
-    ("player_death_pvp", re.compile(r'(\w+) was (?:slain|killed|shot|frozen) by (\w+)')),
     # 物品获得
     ("player_item_get", re.compile(r'(\w+) has (?:obtained|acquired|received)')),
     # 服务器生命周期

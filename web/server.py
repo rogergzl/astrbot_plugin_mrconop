@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import time
+from datetime import datetime
 from pathlib import Path
 from html import escape
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -184,6 +185,7 @@ var A="/api",tab="dashboard",rf=null,idleTO=600,idleT=null,bgT=null;
 function gn(srvs){if(!srvs||!srvs.length)return"";var n=srvs[0].name||srvs[0].server_name||"";return n}
 var d=document;
 function escapeHtml(s){if(!s)return"";return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;")}
+var hx=escapeHtml;
 function toast(m,e){var t=d.getElementById("toast");t.className="toast "+(e?"te":"to");t.textContent=m;t.style.display="block";setTimeout(function(){t.style.display="none"},2500)}
 async function refLog(){try{await loLogViewer();toast("日志已刷新")}catch(e){toast("刷新失败: "+e.message,true)}}
 async function testLogFile(){if(!_lv_server){toast("请先选择服务器",true);return}toast("正在检测...");try{var r=await fj(A+"/log-viewer/test?server="+encodeURIComponent(_lv_server));var h='';h+='<div class="mbg" onclick="if(event.target===this)this.remove()"><div class="mod" style="max-width:700px"><h3>🔍 日志检测: '+_lv_server+'</h3>';if(!r.ok){h+='<div style="padding:14px;border-radius:6px;background:rgba(231,76,60,.1);color:var(--d);margin:8px 0"><strong>❌ '+r.error+'</strong><br><small>'+r.hint+'</small></div>'}else{h+='<div style="color:var(--s);margin-bottom:8px">✅ '+r.summary+'</div>';if(r.paths){r.paths.forEach(function(p){h+='<div class="ct" style="margin-bottom:8px"><strong>📁 '+p.path+'</strong>';if(!p.exists){h+='<div style="color:var(--d)">❌ 文件不存在</div>'}else if(!p.readable){h+='<div style="color:var(--d)">❌ '+p.error+'</div>'}else{h+='<div style="font-size:11px;color:var(--m)">大小: '+(p.size/1024).toFixed(1)+' KB | 最后 '+p.lines+' 行可读</div>';if(p.sample&&p.sample.length){h+='<pre style="font-size:10px;max-height:200px;overflow:auto;background:var(--bg);padding:8px;border-radius:4px;margin-top:4px">'+p.sample.map(function(l){return escapeHtml(l)}).join('\n')+'</pre>'}}h+='</div>'})}}h+='<button class="b2 bs" onclick="document.querySelector(\'.mbg\').remove()">关闭</button></div></div>';document.body.insertAdjacentHTML("beforeend",h)}catch(e){toast("检测失败: "+e.message,true)}}
@@ -306,7 +308,7 @@ async function refreshOnline(){toast("正在查询在线玩家...");try{var r=aw
 async function resetRanking(){if(!confirm("确定要重置所有在线时长排行数据吗？此操作不可撤销。"))return;try{var r=await pj(A+"/online_ranking/reset",{});toast("已重置，删除了 "+r.deleted+" 条记录");loOn()}catch(e){var msg=e.message;try{var j=JSON.parse(msg);msg=j.error||msg}catch(x){}toast(msg,true)}}
 async function showPlayerDetail(playerName){var resp=await fj(A+"/online"),o=resp.online||resp;var sessions=[];var totalMin=0;for(var sid in o){var pl=o[sid]||{};if(pl[playerName]){var pp=pl[playerName];sessions.push({server:sid,login_at:pp.login_at,session_minutes:pp.session_minutes||0});totalMin+=pp.session_minutes||0}}var hh=Math.floor(totalMin/60),mm=totalMin%60;var h='<div class="mbg" id="pd-m" onclick="if(event.target===this)this.remove()"><div class="mod"><h3>👤 '+playerName+'</h3><p style="color:var(--m);margin-bottom:8px">当前总在线: '+hh+'小时'+mm+'分钟</p>';if(sessions.length>0){h+='<table><tr><th>服务器</th><th>登录时间</th><th>在线时长</th></tr>';for(var i=0;i<sessions.length;i++){var s=sessions[i],sh=Math.floor(s.session_minutes/60),sm=s.session_minutes%60,lt=s.login_at?new Date(s.login_at*1000).toLocaleString("zh-CN"):"-";h+='<tr><td>'+s.server+'</td><td>'+lt+'</td><td>'+sh+'时'+sm+'分</td></tr>'}h+='</table>'}else{h+='<p style="color:var(--m)">该玩家当前不在线</p>'}try{var rk=await fj(A+"/online_ranking?limit=50");if(rk){for(var i=0;i<rk.length;i++){if(rk[i].player_name===playerName){var rh=Math.floor((rk[i].total||0)/3600),rm=Math.floor(((rk[i].total||0)%3600)/60);h+='<p style="margin-top:10px;color:var(--s)">📊 历史总在线: '+rh+'小时'+rm+'分钟 (排名 #'+(i+1)+')</p>';break}}}var oh=await fj(A+"/online_history?limit=200");if(oh){var ph=[];for(var i=0;i<oh.length;i++){if(oh[i].player_name===playerName)ph.push(oh[i])}if(ph.length>0){h+='<h4 style="margin-top:12px;color:var(--a)">📜 最近在线记录</h4><table><tr><th>服务器</th><th>上线</th><th>下线</th><th>时长</th></tr>';for(var i=0;i<Math.min(ph.length,20);i++){var r=ph[i];h+='<tr><td>'+r.server_name+'</td><td>'+r.start_fmt+'</td><td>'+r.end_fmt+'</td><td>'+Math.floor(r.minutes)+'分钟</td></tr>'}h+='</table>'}}}catch(e){}h+='<button class="b2 bs" style="margin-top:12px" onclick="document.getElementById(\'pd-m\').remove()">关闭</button></div></div>';document.body.insertAdjacentHTML("beforeend",h)}
 /* ====== 审计日志 ====== */
-async function loAu(cat){cat=cat||"";var u=A+"/audit?limit=100";if(cat)u+="&category="+cat;var g=await fj(A+"/groups"),a=await fj(u),h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">审计日志 (最近100条)</h3><button class="b2 bsm" onclick="loAu()">刷新</button></div><div class="fbar"><button class="bsm '+(cat===''?'bw':'b2')+'" onclick="loAu(\'\')">全部</button><button class="bsm '+(cat==='cmd'?'b1':'b2')+'" onclick="loAu(\'cmd\')">命令</button><button class="bsm '+(cat==='web'?'b1':'b2')+'" onclick="loAu(\'web\')">Web操作</button><button class="bsm '+(cat==='web_rcon'?'b1':'b2')+'" onclick="loAu(\'web_rcon\')">Web命令</button></div>';if(!a||!a.length){h+='<div class="emp">暂无审计日志</div>'}else{var catNames={cmd:"命令",web:"Web操作",web_rcon:"Web命令"};h+='<div class="ct"><table><tr><th>时间</th><th>类型</th><th>QQ号</th><th>昵称</th><th>群聊</th><th>操作</th><th>结果</th><th>详情</th></tr>';for(var i=0;i<a.length;i++){var r=a[i],ts=r.time?new Date(r.time*1000).toLocaleString("zh-CN"):"-",grp=gn(g[r.group_id]||[]),ct=r.category||"cmd",cn=catNames[ct]||ct;h+='<tr><td>'+ts+'</td><td><span class="badge" style="font-size:10px">'+cn+'</span></td><td>'+r.sender_id+'</td><td>'+r.sender_name+'</td><td>'+(grp||(r.group_id?'群 '+r.group_id:'-'))+'</td><td><code style="font-size:10px">'+r.cmd+'</code></td><td><span class="t1 '+(r.ok?'t-on':'t-off')+'">'+(r.ok?'成功':'失败')+'</span></td><td style="max-width:200px;font-size:10px">'+(r.resp||'').slice(0,80)+'</td></tr>'}h+='</table></div>'}document.getElementById("main").innerHTML=h;refresh(20000,loAu)}
+async function loAu(pg,cat,ctx){pg=pg||1;cat=cat||(ctx?ctx.cat:"");var fs=ctx||{cat:"",kw:"",et:"",tf:0,tt:0};if(!ctx){loAu._fs=fs;}else{loAu._fs=fs;}var qs="limit=50&offset="+((pg-1)*50);if(cat)qs+="&category="+cat;if(fs.kw)qs+="&keyword="+encodeURIComponent(fs.kw);if(fs.et)qs+="&event_type="+fs.et;if(fs.tf)qs+="&time_from="+fs.tf;if(fs.tt)qs+="&time_to="+fs.tt;var g=await fj(A+"/groups"),d=await fj(A+"/audit?"+qs),entries=d.entries||[],total=d.total||0,tp=Math.ceil(total/50),h='<div id="au-top" style="margin-bottom:16px"><h3 style="margin:0 0 10px 0">审计日志 (共'+total+'条)</h3><div class="fbar" style="margin-bottom:6px"><input id="akw" placeholder="搜索关键词" value="'+hx(fs.kw)+'" style="width:140px" oninput="loAu_li()" onkeydown="if(event.key==\'Enter\')loAu_s()"><input id="aet" placeholder="事件类型" value="'+hx(fs.et)+'" style="width:80px" oninput="loAu_li()"><input id="atf" type="date" style="width:110px"><input id="att" type="date" style="width:110px"><button class="b1 bsm" onclick="loAu_s()">搜索</button><button class="b2 bsm" onclick="loAu_s(1)">Reset</button><button class="bw bsm" onclick="loAu_exp(\'csv\')">CSV</button><button class="bw bsm" onclick="loAu_exp(\'json\')">JSON</button><button class="b3 bsm" onclick="loAu_del()">删除本页</button></div>';var catNames={cmd:"命令",web:"Web操作",web_rcon:"Web命令",event_macro:"事件宏",online_duration_macro:"在线时长宏",online_trigger:"上线触发",relay:"群服转发",game_notify:"游戏提醒"},catBtns='<div class="fbar"><button class="bsm '+(cat===""?"bw":"b2")+'" onclick="var f=loAu._fs||{};loAu(1,\'\',{cat:\'\',kw:f.kw,et:f.et,tf:f.tf,tt:f.tt})">全部</button>';["cmd","web","web_rcon","event_macro","online_duration_macro","online_trigger","relay","game_notify"].forEach(function(c){catBtns+='<button class="bsm '+(cat===c?"b1":"b2")+'" onclick="var f=loAu._fs||{};loAu(1,\''+c+'\',{cat:\''+c+'\',kw:f.kw,et:f.et,tf:f.tf,tt:f.tt})">'+((catNames[c]||c).slice(0,5))+'</button>'});h+=catBtns+'</div><div id="au-res">';if(!entries.length){h+='<div class="emp">暂无匹配的审计日志</div>'}else{h+='<div class="ct"><table><tr><th style="width:12px"><input type="checkbox" onclick="loAu_ca(this)"></th><th>时间</th><th>类型</th><th>QQ号</th><th>昵称</th><th>群聊</th><th>操作</th><th>结果</th><th>详情</th></tr>';for(var i=0;i<entries.length;i++){var r=entries[i],ts=r.time?new Date(r.time*1000).toLocaleString("zh-CN"):"-",grp=gn(g[r.group_id]||[]),ct=r.category||"cmd",cn=catNames[ct]||ct;h+='<tr><td><input type="checkbox" value="'+r.id+'" class="lac"></td><td>'+ts+'</td><td><span class="badge" style="font-size:10px">'+cn+'</span>'+(r.event_type?' <span style="font-size:9px;color:#aaa">'+r.event_type+'</span>':'')+'</td><td>'+r.sender_id+'</td><td>'+r.sender_name+'</td><td>'+(grp||(r.group_id?"群"+r.group_id:"-"))+'</td><td style="max-width:180px;overflow:hidden"><code style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block" title="'+hx(r.cmd||"").replace(/"/g,"&quot;")+'">'+hx(r.cmd||"")+'</code></td><td><span class="t1 '+(r.ok?"t-on":"t-off")+'">'+(r.ok?"成功":"失败")+'</span></td><td style="max-width:200px;font-size:10px">'+(r.resp||"").slice(0,80)+'</td></tr>'}h+='</table></div>'}var pgs='<div class="fbar" style="margin-top:8px"><span style="font-size:12px">第'+pg+'/'+tp+'页</span>';for(var j=1;j<=Math.min(tp,10);j++){pgs+='<button class="bsm '+(j===pg?"b1":"b2")+'" onclick="loAu('+j+',\''+cat+'\')">'+j+'</button>'}if(tp>10)pgs+='<span style="font-size:11px;color:#aaa">...共'+tp+'页</span>';h+=pgs+'</div>';document.getElementById("main").innerHTML=h;refresh(30000,loAu)}function loAu_li(){clearTimeout(loAu._t);loAu._t=setTimeout(async function(){var kw=document.getElementById("akw").value.trim(),et=document.getElementById("aet").value.trim(),tf=document.getElementById("atf").value?Math.floor(new Date(document.getElementById("atf").value).getTime()/1000):0,tt=document.getElementById("att").value?Math.floor(new Date(document.getElementById("att").value).getTime()/1000+86399):0,fs=loAu._fs||{},cat=fs.cat||"",qs="limit=50&offset=0";if(cat)qs+="&category="+cat;if(kw)qs+="&keyword="+encodeURIComponent(kw);if(et)qs+="&event_type="+et;if(tf)qs+="&time_from="+tf;if(tt)qs+="&time_to="+tt;loAu._fs={cat:cat,kw:kw,et:et,tf:tf,tt:tt};var d=await fj(A+"/audit?"+qs),entries=d.entries||[],total=d.total||0,tp=Math.ceil(total/50),res="";if(!entries.length){res='<div class="emp">暂无匹配的审计日志</div>'}else{var catNames={cmd:"命令",web:"Web操作",web_rcon:"Web命令",event_macro:"事件宏",online_duration_macro:"在线时长宏",online_trigger:"上线触发",relay:"群服转发",game_notify:"游戏提醒"};res='<div class="ct"><table><tr><th style="width:12px"><input type="checkbox" onclick="loAu_ca(this)"></th><th>时间</th><th>类型</th><th>QQ号</th><th>昵称</th><th>群聊</th><th>操作</th><th>结果</th><th>详情</th></tr>';for(var i=0;i<entries.length;i++){var r=entries[i],ts=r.time?new Date(r.time*1000).toLocaleString("zh-CN"):"-",ct=r.category||"cmd",cn=catNames[ct]||ct;res+='<tr><td><input type="checkbox" value="'+r.id+'" class="lac"></td><td>'+ts+'</td><td><span class="badge" style="font-size:10px">'+cn+'</span>'+(r.event_type?' <span style="font-size:9px;color:#aaa">'+r.event_type+'</span>':'')+'</td><td>'+r.sender_id+'</td><td>'+r.sender_name+'</td><td>'+((r.group_id?"群"+r.group_id:"-"))+'</td><td style="max-width:180px;overflow:hidden"><code style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block" title="'+hx(r.cmd||"").replace(/"/g,"&quot;")+'">'+hx(r.cmd||"")+'</code></td><td><span class="t1 '+(r.ok?"t-on":"t-off")+'">'+(r.ok?"成功":"失败")+'</span></td><td style="max-width:200px;font-size:10px">'+(r.resp||"").slice(0,80)+'</td></tr>'}res+='</table></div>'}res+='<div class="fbar" style="margin-top:8px"><span style="font-size:12px">第1/'+tp+'页</span>';for(var j=1;j<=Math.min(tp,10);j++){res+='<button class="bsm '+(j===1?"b1":"b2")+'" onclick="loAu('+j+',\''+cat+'\')">'+j+'</button>'}if(tp>10)res+='<span style="font-size:11px;color:#aaa">...共'+tp+'页</span>';res+='</div>';var el=document.getElementById("au-res");if(el)el.innerHTML=res;var h3=document.querySelector("#au-top h3");if(h3)h3.textContent="审计日志 (共"+total+"条)"},300)}function loAu_s(pg){pg=pg||1;var kw=document.getElementById("akw").value.trim(),et=document.getElementById("aet").value.trim(),tf=document.getElementById("atf").value?Math.floor(new Date(document.getElementById("atf").value).getTime()/1000):0,tt=document.getElementById("att").value?Math.floor(new Date(document.getElementById("att").value).getTime()/1000+86399):0;loAu(1,"",{cat:"",kw:kw,et:et,tf:tf,tt:tt})}function loAu_ca(cb){var cs=document.querySelectorAll(".lac");for(var i=0;i<cs.length;i++)cs[i].checked=cb.checked}async function loAu_exp(fmt){var fs=loAu._fs||{},qs="format="+fmt;if(fs.kw)qs+="&keyword="+encodeURIComponent(fs.kw);if(fs.cat)qs+="&category="+fs.cat;if(fs.et)qs+="&event_type="+fs.et;if(fs.tf)qs+="&time_from="+fs.tf;if(fs.tt)qs+="&time_to="+fs.tt;var url=A+"/audit/export?"+qs;window.open(url,"_blank")}async function loAu_del(){var cs=document.querySelectorAll(".lac:checked"),ids=[];for(var i=0;i<cs.length;i++)ids.push(parseInt(cs[i].value));if(!ids.length){alert("请勾选要删除的条目");return}if(!confirm("确认删除选中的 "+ids.length+" 条审计日志？"))return;var r=await fetch(A+"/audit/delete",{method:"POST",body:JSON.stringify({ids:ids})});var d=await r.json();if(d.deleted)loAu();else alert("删除失败: "+(d.error||"未知错误"))}
 /* ====== 宏命令 ====== */
 async function loMa(){var m=await fj(A+"/macros"),em=await fj(A+"/event-macros"),h='<div class="fb" style="margin-bottom:12px"><h3 style="margin:0">宏命令管理</h3><button class="b1 bsm" onclick="adMac()">+ 新建宏</button></div>';for(var n in m){var mc=m[n],cmds=mc.commands||mc,en=mc.enabled!==false;h+='<div class="ct"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div style="flex:1"><h3 style="margin:0 0 4px">'+n+'<label class="tg" style="margin-left:8px;vertical-align:middle"><input type="checkbox" '+(en?'checked':'')+' onchange="tglMa(\''+n.replace(/'/g,"\\'")+'\',this.checked)"><span class="sl"></span></label><span style="color:var(--m);font-size:10px;margin-left:6px">'+(en?'启用':'禁用')+'</span><span class="badge" style="margin-left:6px">'+cmds.length+'条命令</span></h3><pre style="margin:4px 0 0">'+cmds.join("\n")+'</pre></div><div class="ac"><button class="b1 bsm" onclick="execMacro(\''+n.replace(/'/g,"\\'")+'\')">▶ 执行</button><button class="bw bsm" onclick="edMac(\''+n.replace(/'/g,"\\'")+'\')">编辑</button><button class="bd bsm" onclick="rmMac(\''+n.replace(/'/g,"\\'")+'\')">删除</button></div></div></div>'}if(!Object.keys(m).length)h+='<div class="emp">暂无宏命令</div>';h+='<hr style="border:1px solid var(--b);margin:20px 0"><div class="fb" style="margin-bottom:12px"><h3 style="margin:0">🪝 日志事件宏</h3><button class="b1 bsm" onclick="adEm()">+ 新建宏</button><button class="b2 bsm" style="margin-left:4px" onclick="expEm()">📤 导出</button><button class="b2 bsm" style="margin-left:2px" onclick="impEm()">📥 导入</button><span style="color:var(--m);font-size:11px;margin-left:8px">日志事件→自动RCON</span></div>';h+='<div class="ct" style="margin-bottom:14px"><div style="display:flex;align-items:flex-start;gap:4px"><span style="color:var(--a);font-size:16px">ℹ️</span><div style="flex:1"><strong style="color:var(--a)">说明</strong><p style="color:var(--m);font-size:12px;line-height:1.8;margin:2px 0">日志事件宏监控<strong style="color:var(--a)">latest.log</strong>文件实时响应游戏事件，自动在指定服务器执行 RCON 命令。需先在<strong style="color:var(--a)">服务器管理</strong>中填写对应服务器的日志路径，并在<strong style="color:var(--a)">全局设置→在线追踪</strong>中开启"RCON 日志监听"。</p><details style="margin-top:4px"><summary style="color:var(--s);font-size:11px;cursor:pointer">📖 参数说明</summary><p style="color:var(--m);font-size:12px;line-height:1.8;margin:6px 0 0">• <strong>前延时(秒)</strong>：事件触发后，<span style="color:#fa0">等待 X 秒再执行命令</span>（非"事件发生前"）。如玩家加入 → 等5秒 → 执行欢迎。<br>• <strong>后延时(秒)</strong>：<span style="color:#fa0">命令执行完后等待 X 秒</span>（非"事件发生后"）。用于多事件顺序延时间隔。<br>• <strong>独立命令</strong>：设前/后延时后展开，每个事件类型可配专属 RCON 命令；为空则用全局命令。<br>• <strong>全局命令</strong>：当事件类型未配独立命令时使用的共享命令。<br>• <strong>逻辑门</strong>：AND=所有条件满足才触发 / OR=任一条件满足即触发，配合下方条件使用。<br>• <strong>冷却时间</strong>：两次触发之间的最小间隔秒数（0=无冷却）。<br>• <strong>频率限制</strong>：指定时间窗口内最多触发次数（0=不限）。<br>• <strong>QQ通知</strong>：触发时发送到QQ群的消息，支持下方变量。<br>• <strong>事件参数</strong>：匹配日志行内容关键词（如 diamond_sword），不区分大小写。</p></details><details style="margin-top:4px"><summary style="color:#fa0;font-size:11px;cursor:pointer">🔄 say / tell / msg 命令自动转换</summary><p style="color:var(--m);font-size:12px;line-height:1.8;margin:6px 0 0">事件宏中使用 <code style="background:var(--bg);padding:2px 5px">say</code> / <code style="background:var(--bg);padding:2px 5px">tell</code> / <code style="background:var(--bg);padding:2px 5px">msg</code> 命令时，插件会自动转换为 <code style="background:var(--bg);padding:2px 5px">tellraw</code>，避免 Minecraft 默认的 <span style="color:#fa0">[Server]</span> 或 <span style="color:#fa0">Rcon 悄悄对你说</span> 前缀。<br><br><span style="color:var(--a)">转换规则：</span><br>• <code style="background:var(--bg);padding:2px 5px">say &lt;消息&gt;</code> → <code style="background:var(--bg);padding:2px 5px">tellraw @a {"text":"&lt;前缀&gt; &lt;消息&gt;"}</code><br>• <code style="background:var(--bg);padding:2px 5px">tell &lt;目标&gt; &lt;消息&gt;</code> → <code style="background:var(--bg);padding:2px 5px">tellraw &lt;目标&gt; {"text":"&lt;前缀&gt; &lt;消息&gt;"}</code><br>• <code style="background:var(--bg);padding:2px 5px">msg &lt;目标&gt; &lt;消息&gt;</code> → <code style="background:var(--bg);padding:2px 5px">tellraw &lt;目标&gt; {"text":"&lt;前缀&gt; &lt;消息&gt;"}</code><br><br><span style="color:var(--m)">前缀来自<strong>全局设置→通用配置→事件宏游戏前缀</strong>（</span><code style="background:var(--bg);padding:2px 5px;color:var(--s)">event_macro_game_prefix</code><span style="color:var(--m)">），无配置时不执行转换。</span></p></details><details style="margin-top:4px"><summary style="color:var(--s);font-size:11px;cursor:pointer">📋 可用变量对照</summary><table style="font-size:11px;margin-top:6px;border-collapse:collapse;width:100%;color:var(--m)"><tr style="background:var(--bg)"><th style="padding:3px 8px;text-align:left;border:1px solid var(--b)">变量</th><th style="padding:3px 8px;text-align:left;border:1px solid var(--b)">说明</th><th style="padding:3px 8px;text-align:left;border:1px solid var(--b)">可用于</th></tr><tr><td style="padding:3px 8px;border:1px solid var(--b)"><code>{player}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">触发的玩家名（小写）</td><td style="padding:3px 8px;border:1px solid var(--b)">RCON命令 / QQ消息</td></tr><tr style="background:var(--bg)"><td style="padding:3px 8px;border:1px solid var(--b)"><code>{PLAYER}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">触发的玩家名（原大小写）</td><td style="padding:3px 8px;border:1px solid var(--b)">RCON命令</td></tr><tr><td style="padding:3px 8px;border:1px solid var(--b)"><code>{mc_id}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">玩家绑定的 MC ID</td><td style="padding:3px 8px;border:1px solid var(--b)">RCON命令 / QQ消息</td></tr><tr style="background:var(--bg)"><td style="padding:3px 8px;border:1px solid var(--b)"><code>{qq}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">玩家绑定的 QQ 号</td><td style="padding:3px 8px;border:1px solid var(--b)">RCON命令 / QQ消息</td></tr><tr><td style="padding:3px 8px;border:1px solid var(--b)"><code>{server}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">当前服务器名称</td><td style="padding:3px 8px;border:1px solid var(--b)">QQ消息</td></tr><tr style="background:var(--bg)"><td style="padding:3px 8px;border:1px solid var(--b)"><code>{event_type}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">事件类型（如 player_join）</td><td style="padding:3px 8px;border:1px solid var(--b)">QQ消息</td></tr><tr><td style="padding:3px 8px;border:1px solid var(--b)"><code>{event_param}</code></td><td style="padding:3px 8px;border:1px solid var(--b)">事件参数（如物品名）</td><td style="padding:3px 8px;border:1px solid var(--b)">QQ消息</td></tr></table></details></div></div></div>';if(!em||!em.length){h+='<div class="emp">暂无事件宏。添加示例：检测"玩家死亡"→执行RCON命令</div>'}else{for(var i=0;i<em.length;i++){var v=em[i];h+='<div class="ct"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div style="flex:1"><strong>'+(v.name||'?')+'</strong>';h+='<label class="tg" style="margin-left:8px;vertical-align:middle"><input type="checkbox" '+(v.enabled?'checked':'')+' onchange="tglEm('+i+',this.checked)"><span class="sl"></span></label>';h+='<span style="color:var(--m);font-size:10px;margin-left:6px">'+(v.enabled?'启用':'禁用')+'</span>';h+=(function(ets){var n={player_first_join:'首次加入',player_join:'加入',player_leave:'退出',player_kick:'被踢',player_death_pvp:'PVP击杀',player_death:'死亡',player_first_death:'首次死亡',player_respawn:'复活',player_advancement:'成就',player_item_get:'物品',server_start:'启动',server_stop:'关闭',server_reload:'重载',boss_kill:'Boss击杀',player_chat:'发言',tps_low:'TPS低',tps_critical:'TPS严重',memory_high:'内存高',server_perf_issue:'性能异常',admin_join:'管理员加入',vip_join:'VIP加入',vip_leave:'VIP退出',vip_death:'VIP死亡'};if(!ets||!ets.length){var et=v.event_type||'';return'<span class="badge" style="margin-left:4px">'+(n[et]||et||'?')+'</span>'}var r='';for(var ei=0;ei<ets.length;ei++){var e=ets[ei],t=typeof e==='object'?e.type||'':e||'',pre=typeof e==='object'?parseFloat(e.pre_delay)||0:0,post=typeof e==='object'?parseFloat(e.post_delay)||0:0,d='';if(pre>0||post>0){d='<span style="font-size:9px;opacity:0.7">(';if(pre>0)d+='前'+pre+'s';if(pre>0&&post>0)d+=' ';if(post>0)d+='后'+post+'s';d+=')</span>'}r+='<span class="badge" style="margin-left:3px;font-size:10px">'+(n[t]||t||'?')+'</span>'+d}return r||'?'})(v.event_types);h+='<span style="color:var(--w);font-size:11px;margin-left:6px">服务器:</span><code>'+(v.server_name||'?')+'</code>';h+='<span style="color:var(--w);font-size:11px;margin-left:8px">冷却:</span>'+(v.cooldown||0)+'s';h+=v.player_name?' <span class="badge" style="background:var(--s)">🎯'+v.player_name+'</span>':'';h+=v.max_triggers>0?' <span style="color:var(--w);font-size:11px;margin-left:6px">频率:</span>'+v.max_triggers+'次/'+(v.trigger_window||0)+'s':'';h+=v.event_param?' <span class="badge" style="background:var(--a);font-size:10px">📋'+v.event_param+'</span>':'';h+=v.qq_message?' <span title="QQ通知已配置" style="color:#fa0;font-size:12px;margin-left:4px;cursor:help">📢</span>':'';h+='</div><div class="ac"><button class="bw bsm" onclick="edEm('+i+')">编辑</button><button class="bd bsm" onclick="delEm('+i+')">删除</button></div></div>';h+=(function(ets){var r='';if(!ets||!ets.length)return'';for(var ei=0;ei<ets.length;ei++){var e=ets[ei];if(typeof e==='object'&&e.commands&&e.commands.length){var n={player_first_join:'首次加入',player_join:'加入',player_leave:'退出',player_kick:'被踢',player_death_pvp:'PVP击杀',player_death:'死亡',player_first_death:'首次死亡',player_respawn:'复活',player_advancement:'成就',player_item_get:'物品',server_start:'启动',server_stop:'关闭',server_reload:'重载',boss_kill:'Boss击杀',player_chat:'发言',tps_low:'TPS低',tps_critical:'TPS严重',memory_high:'内存高',server_perf_issue:'性能异常',admin_join:'管理员加入',vip_join:'VIP加入',vip_leave:'VIP退出',vip_death:'VIP死亡'};r+='<div style="margin-top:6px;padding:4px 8px;background:var(--bg);border-left:3px solid var(--s);border-radius:3px"><strong style="font-size:10px;color:var(--s)">'+(n[e.type]||e.type)+' 独立命令</strong>'+(function(ecmds){var p='';for(var ci=0;ci<ecmds.length;ci++){var c=ecmds[ci],cmd='',dly=0;if(typeof c==='object'){cmd=c.cmd||'';dly=parseFloat(c.delay)||0}else{cmd=c||''}if(!cmd)continue;p+='<div style="font-size:10px;color:var(--a);margin-top:2px;padding-left:4px;border-left:2px solid var(--b)">'+cmd+(dly>0?' <span style="font-size:9px;color:var(--m)">(延时'+dly+'s)</span>':'')+'</div>'}return p})(e.commands)+'</div>'}}return r})(v.event_types);h+='<pre style="margin:6px 0 0;font-size:11px;color:var(--s)">'+((v.commands||[]).join("\n"))+'</pre></div>'}}document.getElementById("main").innerHTML=h;window._macros=m;window._emacros=em}
 function adMac(){document.body.insertAdjacentHTML("beforeend",'<div class="mbg" id="mc-m" onclick="if(event.target===this)this.remove()"><div class="mod"><h3>新建宏</h3><div class="fg"><label>宏名称</label><input id="mfn"></div><div class="fg"><label>命令列表(一行一条命令)</label><textarea id="mfc" rows="6"></textarea></div><div class="fr" style="margin-top:14px"><button class="b1 bs" onclick="doMac()">保存</button><button class="b2 bs" onclick="document.getElementById(\'mc-m\').remove()">取消</button></div></div></div>')}
@@ -783,6 +785,15 @@ class WebServer:
     def _json_err(self, status: int, msg: str) -> bytes:
         return self._json({"error": msg}, status=status)
 
+    def _raw_bytes(self, body: str | bytes, content_type: str, filename: str = "") -> bytes:
+        """返回原始字节响应（用于导出文件）"""
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        extra = {}
+        if filename:
+            extra["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return self._build(200, "OK", content_type, body, extra_headers=extra)
+
     def _redirect(self, location: str, extra_headers: Dict[str, str] = None) -> bytes:
         headers = [
             "HTTP/1.1 302 Found",
@@ -1070,8 +1081,27 @@ class WebServer:
         # ---------- 审计 ----------
         if route == "/api/audit":
             limit = int(params.get("limit", ["100"])[0])
+            offset = int(params.get("offset", ["0"])[0])
             category = params.get("category", [""])[0]
-            return self._api_audit(limit, category)
+            keyword = params.get("keyword", [""])[0]
+            event_type = params.get("event_type", [""])[0]
+            server_name = params.get("server_name", [""])[0]
+            time_from = int(params.get("time_from", ["0"])[0])
+            time_to = int(params.get("time_to", ["0"])[0])
+            ok = params.get("ok", [None])[0]
+            if ok is not None:
+                ok = ok.lower() in ("1", "true")
+            return self._api_audit_search(limit, offset, category, event_type, server_name, keyword, ok, time_from, time_to)
+        if route == "/api/audit/export":
+            fmt = params.get("format", ["json"])[0]
+            keyword = params.get("keyword", [""])[0]
+            category = params.get("category", [""])[0]
+            event_type = params.get("event_type", [""])[0]
+            time_from = int(params.get("time_from", ["0"])[0])
+            time_to = int(params.get("time_to", ["0"])[0])
+            return self._api_audit_export(fmt, keyword, category, event_type, time_from, time_to)
+        if route == "/api/audit/delete" and method == "POST":
+            return self._api_audit_delete(body)
 
         # ---------- 宏 ----------
         if route == "/api/macros":
@@ -1630,6 +1660,9 @@ class WebServer:
             # audit
             "audit_auto_enabled": getattr(p, "audit_auto_enabled", True),
             "audit_skip_categories": getattr(p, "audit_skip_categories", []),
+            "audit_db_enabled": getattr(p, "audit_db_enabled", True),
+            "audit_retention_days": getattr(p, "audit_retention_days", 90),
+            "audit_jsonl_enabled": getattr(p, "audit_jsonl_keep", True),
             # dangerous
             "dangerous_blacklist": p.dangerous_blacklist,
             # online db
@@ -1987,6 +2020,18 @@ class WebServer:
             ac = cfg.setdefault("audit", {})
             ac["skip_categories"] = list(data["audit_skip_categories"]) if isinstance(data["audit_skip_categories"], list) else []
             p.audit_skip_categories = ac["skip_categories"]
+        if "audit_db_enabled" in data:
+            ac = cfg.setdefault("audit", {})
+            ac["db_enabled"] = bool(data["audit_db_enabled"])
+            p.audit_db_enabled = ac["db_enabled"]
+        if "audit_retention_days" in data:
+            ac = cfg.setdefault("audit", {})
+            ac["retention_days"] = int(data["audit_retention_days"]) if data["audit_retention_days"] else 90
+            p.audit_retention_days = ac["retention_days"]
+        if "audit_jsonl_enabled" in data:
+            ac = cfg.setdefault("audit", {})
+            ac["jsonl_enabled"] = bool(data["audit_jsonl_enabled"])
+            p.audit_jsonl_keep = ac["jsonl_enabled"]
         # 在线数据库
         odb = cfg.setdefault("online_db", {})
         if "online_db_storage_mode" in data:
@@ -2363,25 +2408,141 @@ class WebServer:
 
     # ==================== 审计 API ====================
 
-    def _api_audit(self, limit: int, category: str = "") -> bytes:
-        af = getattr(self.plugin, 'audit_file', None)
+    def _api_audit_search(self, limit: int, offset: int, category: str = "",
+                          event_type: str = "", server_name: str = "",
+                          keyword: str = "", ok: bool | None = None,
+                          time_from: int = 0, time_to: int = 0) -> bytes:
+        """审计日志搜索（优先 DB，回退 JSONL）"""
+        p = self.plugin
+        # 优先走数据库
+        if getattr(p, "audit_db_enabled", False):
+            try:
+                entries, total = p.db.search_audit_logs(
+                    limit=limit, offset=offset,
+                    category=category, event_type=event_type,
+                    server_name=server_name, keyword=keyword,
+                    ok=ok, time_from=time_from, time_to=time_to,
+                )
+                for e in entries:
+                    e["ok"] = bool(e["ok"])
+                return self._json({"entries": entries, "total": total})
+            except Exception:
+                pass
+        # 回退 JSONL
+        af = getattr(p, "audit_file", None)
         if not af or not os.path.exists(af):
-            return self._json([])
+            return self._json({"entries": [], "total": 0})
         entries = []
-        with open(af, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(af, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     entry = json.loads(line)
-                    if category and entry.get("category", "cmd") != category:
-                        continue
-                    entries.append(entry)
                 except json.JSONDecodeError:
                     continue
-        entries.reverse()
-        return self._json(entries[:limit])
+                if category and entry.get("category", "cmd") != category:
+                    continue
+                if event_type and entry.get("event_type", "") != event_type:
+                    continue
+                if server_name and entry.get("server_name", "") != server_name:
+                    continue
+                if keyword:
+                    kw = keyword.lower()
+                    if kw not in (entry.get("cmd","")+entry.get("resp","")+entry.get("sender_name","")+entry.get("event_type","")).lower():
+                        continue
+                if ok is not None and bool(entry.get("ok", True)) != ok:
+                    continue
+                if time_from > 0 and int(entry.get("time", 0)) < time_from:
+                    continue
+                if time_to > 0 and int(entry.get("time", 0)) > time_to:
+                    continue
+                entries.append(entry)
+        total = len(entries)
+        entries.sort(key=lambda x: x.get("time", 0), reverse=True)
+        entries = entries[offset:offset + limit]
+        return self._json({"entries": entries, "total": total})
+
+    def _api_audit_export(self, fmt: str = "json", keyword: str = "",
+                          category: str = "", event_type: str = "",
+                          time_from: int = 0, time_to: int = 0) -> bytes:
+        """导出审计日志"""
+        p = self.plugin
+        entries = []
+        # 优先从 DB 导出
+        if getattr(p, "audit_db_enabled", False):
+            try:
+                entries, _ = p.db.search_audit_logs(
+                    limit=50000, offset=0,
+                    category=category, event_type=event_type,
+                    keyword=keyword, time_from=time_from, time_to=time_to,
+                )
+            except Exception:
+                pass
+        # 否则从 JSONL 读取
+        if not entries:
+            af = getattr(p, "audit_file", None)
+            if af and os.path.exists(af):
+                with open(af, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if category and entry.get("category", "cmd") != category:
+                            continue
+                        if event_type and entry.get("event_type", "") != event_type:
+                            continue
+                        if keyword:
+                            kw = keyword.lower()
+                            if kw not in (entry.get("cmd","")+entry.get("resp","")+entry.get("sender_name","")).lower():
+                                continue
+                        if time_from > 0 and int(entry.get("time", 0)) < time_from:
+                            continue
+                        if time_to > 0 and int(entry.get("time", 0)) > time_to:
+                            continue
+                        entries.append(entry)
+                entries.sort(key=lambda x: x.get("time", 0), reverse=True)
+        if fmt == "csv":
+            header = "\uFEFF" + "时间,类型,事件,QQ号,昵称,群聊,操作,结果,详情\n"
+            rows = []
+            for e in entries:
+                t = datetime.fromtimestamp(e.get("time", 0)).strftime("%Y-%m-%d %H:%M:%S")
+                ok_text = "成功" if e.get("ok", True) else "失败"
+                row = f'"{t}","{e.get("category","")}","{e.get("event_type","")}",'
+                row += f'"{e.get("sender_id","")}","{e.get("sender_name","")}","{e.get("group_id","")}",'
+                row += f'"{e.get("cmd","")}","{ok_text}","{e.get("resp","")}"'
+                rows.append(row)
+            return self._raw_bytes(header + "\n".join(rows), "text/csv; charset=utf-8", "audit_logs.csv")
+        else:
+            return self._raw_bytes(json.dumps(entries, ensure_ascii=False, indent=2),
+                                   "application/json; charset=utf-8", "audit_logs.json")
+
+    def _api_audit_delete(self, body: bytes) -> bytes:
+        """批量删除审计日志（按 ID 或按时间范围）"""
+        p = self.plugin
+        try:
+            data = json.loads(body)
+        except Exception:
+            return self._json_err(400, "无效的 JSON")
+        ids = data.get("ids", [])
+        before_ts = data.get("before_ts", 0)
+        if not getattr(p, "audit_db_enabled", False):
+            return self._json_err(400, "审计数据库未启用")
+        try:
+            if ids and isinstance(ids, list):
+                deleted = p.db.delete_audit_logs_by_ids([int(i) for i in ids])
+            elif before_ts:
+                deleted = p.db.delete_audit_logs_before(int(before_ts))
+            else:
+                return self._json_err(400, "缺少 ids 或 before_ts 参数")
+            return self._json({"deleted": deleted})
+        except Exception as e:
+            return self._json_err(500, str(e))
 
     # ==================== 宏 API ====================
 

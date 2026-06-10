@@ -144,7 +144,7 @@ from .core.server_manager import cmd_onlinetime as _core_cmd_onlinetime
 from .core.online_tracker import cmd_tracker_set as _core_cmd_tracker_set
 
 
-@register("mrcon", "lindagao", "MC 综合管理插件", "4.2.2")
+@register("mrcon", "lindagao", "MC 综合管理插件", "4.2.4")
 class MrconPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -333,6 +333,9 @@ class MrconPlugin(Star):
         audit_cfg = self.config.get("audit", {})
         self.audit_auto_enabled = bool(audit_cfg.get("auto_enabled", True))
         self.audit_skip_categories = audit_cfg.get("skip_categories", []) or []
+        self.audit_db_enabled = bool(audit_cfg.get("db_enabled", True))
+        self.audit_retention_days = int(audit_cfg.get("retention_days", 90) or 90)
+        self.audit_jsonl_keep = bool(audit_cfg.get("jsonl_enabled", True))
         self.pending_select = {}
         self.select_ttl = int(general_cfg.get("select_ttl", 30) or 30)
         self.rcn_persistent = bool(general_cfg.get("rcn_persistent", True))
@@ -718,6 +721,10 @@ class MrconPlugin(Star):
                 self._web_panel_task = asyncio.create_task(self._web_panel.run())
             except Exception as e:
                 logger.warning(f"[mrcon] Web 面板启动失败: {e}")
+        if self.audit_db_enabled and self.audit_retention_days > 0:
+            self._audit_cleanup_task = asyncio.create_task(self._audit_cleanup_loop())
+        else:
+            self._audit_cleanup_task = None
 
     async def terminate(self):
         if self._web_panel_task:
@@ -735,6 +742,9 @@ class MrconPlugin(Star):
         if self._tracker_task:
             self._tracker_task.cancel()
             self._tracker_task = None
+        if getattr(self, "_audit_cleanup_task", None):
+            self._audit_cleanup_task.cancel()
+            self._audit_cleanup_task = None
         try:
             await self._log_listener.stop()
         except Exception:
@@ -773,17 +783,24 @@ class MrconPlugin(Star):
     async def _schedule_select_timeout(self, event: AstrMessageEvent, key: str):
         return await _core_schedule_select_timeout(self, event, key)
 
-    def _audit(self, event: AstrMessageEvent, cmd: str, ok: bool, resp: str, category: str = "cmd"):
-        _core_audit(self, event, cmd, ok, resp, category)
+    def _audit(self, event: AstrMessageEvent, cmd: str, ok: bool, resp: str, category: str = "cmd",
+               event_type: str = "", server_name: str = ""):
+        _core_audit(self, event, cmd, ok, resp, category, event_type=event_type, server_name=server_name)
 
-    def _audit_web(self, op: str, detail: str = "", ok: bool = True, operator: str = "web"):
-        _core_audit_web(self, op, detail, ok, operator)
+    def _audit_web(self, op: str, detail: str = "", ok: bool = True, operator: str = "web",
+                   event_type: str = "", server_name: str = ""):
+        _core_audit_web(self, op, detail, ok, operator, event_type=event_type, server_name=server_name)
 
-    def _audit_web_cmd(self, op: str, detail: str = "", ok: bool = True, operator: str = "web"):
-        _core_audit_web_cmd(self, op, detail, ok, operator)
+    def _audit_web_cmd(self, op: str, detail: str = "", ok: bool = True, operator: str = "web",
+                       event_type: str = "", server_name: str = ""):
+        _core_audit_web_cmd(self, op, detail, ok, operator, event_type=event_type, server_name=server_name)
 
-    def _audit_auto(self, category: str, cmd: str, detail: str = "", ok: bool = True):
-        _core_audit_auto(self, category, cmd, detail, ok)
+    def _audit_auto(self, category: str, cmd: str, detail: str = "", ok: bool = True,
+                    event_type: str = "", server_name: str = "", group_id: str = "",
+                    sender_name: str = "auto"):
+        _core_audit_auto(self, category, cmd, detail, ok,
+                         event_type=event_type, server_name=server_name,
+                         group_id=group_id, sender_name=sender_name)
 
     def _match_dangerous(self, cmd: str) -> bool:
         return _core_match_dangerous(self, cmd)
@@ -895,6 +912,24 @@ class MrconPlugin(Star):
 
     async def _online_tracker_loop(self):
         return await _core_online_tracker_loop(self)
+
+    async def _audit_cleanup_loop(self):
+        """定时清理过期审计日志（按 retention_days 配置）"""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # 每小时执行一次
+                if not getattr(self, "audit_db_enabled", False):
+                    continue
+                days = getattr(self, "audit_retention_days", 0)
+                if days <= 0:
+                    continue
+                deleted = self.db.cleanup_audit_logs(days)
+                if deleted > 0:
+                    logger.info(f"[mrcon] 审计日志清理: 删除了 {deleted} 条超过 {days} 天的记录")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[mrcon] 审计日志清理异常: {e}")
 
     def _init_log_listeners(self):
         _core_init_log_listeners(self)
@@ -1179,7 +1214,7 @@ class MrconPlugin(Star):
         async for msg in _core_cmd_custom(self, event, alias):
             yield msg
 
-    @filter.command("rchelp", desc="查看所有可用命令", alias={"rc帮助", "帮助", "help", "mchelp"})
+    @filter.command("rchelp", desc="查看所有可用命令", alias={"rc帮助", "mchelp"})
     async def cmd_help(self, event: AstrMessageEvent):
         async for msg in _core_cmd_help(self, event):
             yield msg
